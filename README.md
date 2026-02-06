@@ -32,7 +32,7 @@ flowchart LR
   Agent[Agent] --> DomServer
   Agent --> ExecServer["exec_server.py (InDesign Exec MCP)"]
   ExecServer --> COM[COM/OLE]
-  COM --> InDesign[Adobe InDesign (running)]
+  COM --> InDesign["Adobe InDesign (running)"]
 ```
 
 Core files:
