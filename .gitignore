@@ -1,0 +1,30 @@
+# Generated database
+indesign_dom.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# InDesign DOM source XML (internal/dev)
+omv$*.xml
+
+# MCP bundles (internal/dev)
+*.mcpb
+
+# Internal development documents
+indesign-dom-mcp-devplan-v2.md
+exec-refactoring-log.md
