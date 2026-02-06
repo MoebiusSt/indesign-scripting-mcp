@@ -3,7 +3,12 @@
 // native JSON availability.  Used by the MCP JSX wrapper to serialise
 // __result safely.
 //
-// Safety features (patterns from IdExtenso / Marc Autret):
+// Attribution:
+// - Safety patterns inspired by IdExtenso (Marc Autret, MIT)
+//   https://github.com/indiscripts/IdExtenso
+// - See THIRD_PARTY_NOTICES.md for license text.
+//
+// Safety features:
 //   - InDesign DOM objects  -> toSpecifier() string
 //   - Circular references   -> "[circular]"
 //   - Max depth (20)        -> "[max depth]"
@@ -53,7 +58,7 @@ function __jsonEncode(v, depth, seen) {
     // This avoids the UnitValue(0.5,'pt')===null bug.
     try { var _ctor = v.constructor; } catch (_) { return 'null'; }
 
-    // InDesign DOM object — serialise via toSpecifier() (IdExtenso pattern).
+    // InDesign DOM object — serialise via toSpecifier().
     // Never iterate DOM properties (risk of crash / freeze).
     if (typeof v.toSpecifier === 'function') {
         try {
@@ -92,7 +97,8 @@ function __jsonEncode(v, depth, seen) {
                 }
             } catch (propErr) {
                 // Silently skip dangerous / unreadable properties
-                // (IdExtenso: scriptPreferences.properties, shadow-settings …)
+                // Example of dangerous/unreadable properties:
+                // scriptPreferences.properties, shadow settings in find/change prefs, etc.
             }
         }
         result = '{' + p.join(',') + '}';

@@ -166,3 +166,8 @@ python manage.py update --xml "C:\\path\\to\\omv$indesign-22.064$22.0.xml"
 
 MIT. See `LICENSE`.
 
+## Third-Party Notices
+
+This repository references safety/serialization patterns inspired by IdExtenso (Marc Autret, MIT).
+See `THIRD_PARTY_NOTICES.md`.
+

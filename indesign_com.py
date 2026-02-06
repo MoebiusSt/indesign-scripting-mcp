@@ -8,7 +8,11 @@ Provides safe JSX execution in InDesign via Windows COM/OLE:
 - DOM-safe JSON serialisation (no eval!)
 - Automatic connection management (GetActiveObject -> Dispatch fallback)
 
-Based on safety patterns from IdExtenso (Marc Autret):
+Attribution:
+- Safety patterns inspired by IdExtenso (Marc Autret, MIT): https://github.com/indiscripts/IdExtenso
+- See THIRD_PARTY_NOTICES.md for license text.
+
+Safety patterns:
 - Property blacklist for known crash-causing DOM properties
 - Structured error objects with line/source/stack info
 - DOM-aware JSON serialisation via toSpecifier()
