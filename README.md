@@ -156,7 +156,9 @@ Add two servers that run from this repo directory (use stdio transport):
 
 Add the same server definitions to `claude_desktop_config.json` (the exact file location depends on your OS install).
 
-## Updating the DOM Database
+## Updating the DOM Database from the Adobe ESTK Object Model Viewer XML-Source
+
+Find the latest OMV DOM xml file for your latest Indesign Version, then 
 
 ```bash
 python manage.py update --xml "C:\\path\\to\\omv$indesign-22.064$22.0.xml"
