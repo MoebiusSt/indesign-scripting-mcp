@@ -8,16 +8,17 @@
 """
 InDesign Exec MCP Server.
 
-Provides 5 tools for executing JSX code in Adobe InDesign via COM/OLE:
-  1. run_jsx          - Execute JSX code with undo grouping
-  2. get_document_info - Query active document overview
-  3. get_selection     - Query current selection
-  4. eval_expression   - Evaluate a short expression
-  5. undo              - Undo last agent operation(s)
+Provides 6 tools for executing JSX code in Adobe InDesign via COM/OLE:
+  1. run_jsx             - Execute JSX code with undo grouping
+  2. get_document_info   - Query active document overview + active view context
+  3. get_selection       - Query current selection
+  4. eval_expression     - Evaluate a short expression
+  5. undo                - Undo last agent operation(s)
+  6. get_quick_reference - DOM cheatsheet for common access patterns
 
 Requires InDesign Desktop running on Windows.
 Uses UndoModes.ENTIRE_SCRIPT to group all operations per call.
-No eval() anywhere — JSX code is inlined, results serialised via __safeStringify.
+No eval() anywhere -- JSX code is inlined, results serialised via __safeStringify.
 """
 
 import json
@@ -55,7 +56,46 @@ mcp = FastMCP(
         "    app.documents.everyItem().layoutWindows.everyItem().activePage = "
         "app.documents.everyItem().pages.itemByName('26');\n"
         "  Example — read all page names in one call:\n"
-        "    __result = doc.pages.everyItem().name;  // returns Array"
+        "    __result = doc.pages.everyItem().name;  // returns Array\n\n"
+        "DOM QUICK REFERENCE -- common access paths (saves DOM lookups):\n"
+        "  Document:     app.activeDocument, app.documents\n"
+        "  Windows:      app.activeWindow, doc.layoutWindows, app.activeWindow.activeSpread,\n"
+        "                app.activeWindow.activePage\n"
+        "  Selection:    app.selection, app.selection[0].constructor.name\n"
+        "  Pages:        doc.pages, doc.spreads, doc.sections, page.documentOffset\n"
+        "  Page items:   spread.allPageItems, spread.pageItems -- Collections on page/spread/doc:\n"
+        "                .textFrames, .rectangles, .ovals, .polygons, .graphicLines, .groups\n"
+        "                Constructor types: TextFrame, Rectangle, Oval, Polygon, GraphicLine,\n"
+        "                Group, Image, EPS, PDF, GraphicLine\n"
+        "  Images:       frame.graphics.length > 0 (test), frame.allGraphics,\n"
+        "                graphic.itemLink, link.filePath, link.status\n"
+        "  Text:         doc.stories, story.texts, story.paragraphs, story.characters,\n"
+        "                story.words, story.insertionPoints, para.contents,\n"
+        "                textFrame.parentStory, .nextTextFrame, .previousTextFrame\n"
+        "  Styles:       doc.paragraphStyles.itemByName('X'), doc.characterStyles,\n"
+        "                doc.objectStyles, .allParagraphStyles, .allCharacterStyles,\n"
+        "                .paragraphStyleGroups, .characterStyleGroups, .objectStyleGroups,\n"
+        "                obj.appliedParagraphStyle, .appliedCharacterStyle, .appliedObjectStyle\n"
+        "  Layers:       doc.layers, doc.activeLayer, item.itemLayer\n"
+        "  Geometry:     item.geometricBounds [top,left,bottom,right], item.visibleBounds\n"
+        "  Transform:    item.transform(coordSpace, anchor, matrix), item.resolve(),\n"
+        "                item.transformValuesOf(), app.transformationMatrices.add(),\n"
+        "                CoordinateSpaces (INNER_, PARENT_, PASTEBOARD_, SPREAD_, PAGE_),\n"
+        "                AnchorPoint (CENTER_ANCHOR, TOP_LEFT_ANCHOR, ...)\n"
+        "  Parent nav:   item.parent, item.parentPage, text.parentStory,\n"
+        "                text.parentTextFrames, .range\n"
+        "  Swatches:     doc.swatches, doc.colors, doc.gradients,\n"
+        "                item.fillColor, item.strokeColor\n"
+        "  Groups:       item.groups, group.pageItems, group.allPageItems\n"
+        "  Find/Change:  app.findTextPreferences = NothingEnum.NOTHING (CLEAR FIRST),\n"
+        "                findGrepPreferences, findChangeGrepOptions\n"
+        "  Export:        doc.exportFile(ExportFormat.PDF_TYPE, File(path), false, preset),\n"
+        "                app.pdfExportPreferences, jpegExportPreferences, pngExportPreferences\n"
+        "  Preferences:  doc.viewPreferences, doc.textFramePreferences, doc.guidePreferences,\n"
+        "                doc.gridPreferences, doc.adjustLayoutPreferences, app.generalPreferences\n"
+        "  Guides:       page.guides.add(), guide.orientation, guide.location\n"
+        "  Hyperlinks:   doc.hyperlinks, doc.hyperlinkTextSources, doc.hyperlinkURLDestinations\n"
+        "For a comprehensive cheatsheet with examples, call the get_quick_reference tool."
     ),
 )
 
@@ -368,6 +408,29 @@ __result = {
         pagesPerDocument: doc.documentPreferences.pagesPerDocument
     }
 };
+
+try {
+    var win = app.activeWindow;
+    if (win instanceof LayoutWindow) {
+        var sp = win.activeSpread;
+        var pg = win.activePage;
+        __result.activeView = {
+            activeSpreadIndex: sp.index,
+            activeSpreadPages: sp.pages.length,
+            activePageName: pg.name,
+            activePageIndex: pg.documentOffset,
+            zoom: win.zoomPercentage
+        };
+        __result.activeSpreadItems = {
+            allPageItems: sp.allPageItems.length,
+            textFrames: sp.textFrames.length,
+            rectangles: sp.rectangles.length,
+            ovals: sp.ovals.length,
+            images: sp.allGraphics.length,
+            groups: sp.groups.length
+        };
+    }
+} catch(viewErr) {}
 """
 
 
@@ -376,7 +439,9 @@ def get_document_info() -> str:
     """Get an overview of the active InDesign document.
 
     Returns document name, page count, item counts, selection info,
-    style counts, and document preferences. Read-only operation.
+    style counts, and document preferences. Also includes active view
+    context (current spread, page, zoom, and item counts on the active
+    spread) when a layout window is open. Read-only operation.
     """
     err = _check_document()
     if err:
@@ -570,6 +635,260 @@ def undo(steps: int = 1) -> str:
         return _fmt(_unwrap_result(result))
     except Exception as e:
         return _fmt({"success": False, "error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: get_quick_reference
+# ---------------------------------------------------------------------------
+
+_QUICK_REFERENCE = """\
+# InDesign ExtendScript Quick Reference
+
+## Document & Windows
+  app.activeDocument                        Current document
+  app.documents                             All open documents
+  app.activeWindow                          Current window (LayoutWindow or StoryWindow)
+  doc.layoutWindows                         All layout windows for this document
+  app.activeWindow.activeSpread             Currently visible spread
+  app.activeWindow.activePage               Currently active page
+
+## Pages, Spreads & Sections
+  doc.pages                                 All pages
+  doc.pages[0], doc.pages.itemByName('3')   Access by index or name
+  doc.spreads                               All spreads
+  doc.masterSpreads                         All master spreads
+  doc.sections                              Document sections (numbering)
+  page.documentOffset                       Absolute page index in document
+  page.appliedMaster                        Master spread applied to page
+
+## Selection
+  app.selection                             Array of selected objects
+  app.selection[0].constructor.name         Type of first selected item
+  // Common types: TextFrame, Rectangle, Oval, Polygon, GraphicLine,
+  //   Group, Image, Text, InsertionPoint, Character, Word, Paragraph
+
+## Page Items (on page, spread, document, or group)
+  container.allPageItems                    ALL items (recursive into groups)
+  container.pageItems                       Direct children only
+  container.textFrames                      TextFrame collection
+  container.rectangles                      Rectangle collection (often image frames)
+  container.ovals                           Oval collection
+  container.polygons                        Polygon collection
+  container.graphicLines                    GraphicLine collection
+  container.groups                          Group collection
+  // 'container' = doc, page, spread, group, or masterSpread
+  // Constructor types: TextFrame, Rectangle, Oval, Polygon, GraphicLine,
+  //   Group, Image, EPS, PDF, GraphicLine
+
+## Images, Graphics & Links
+  frame.graphics                            Graphics placed inside a frame
+  frame.graphics.length > 0                 Test: frame contains placed image?
+  frame.allGraphics                         All graphics (recursive into groups)
+  frame.graphics[0]                         The Image/EPS/PDF object
+  graphic.itemLink                          Link object for placed file
+  link.filePath                             Full path to linked file
+  link.status                               LinkStatus.NORMAL, LINK_MISSING, etc.
+  doc.links                                 All links in the document
+  doc.allGraphics                           All graphics across entire document
+
+## Text, Stories & Threading
+  doc.stories                               All stories (text flows)
+  story.texts                               All text ranges in a story
+  story.paragraphs                          Paragraph collection
+  story.characters                          Character collection
+  story.words                               Word collection
+  story.insertionPoints                     Cursor positions between characters
+  story.contents                            Full text content (read/write)
+  paragraph.contents                        Text of a single paragraph
+  text.range(startIdx, endIdx)              Subrange of text
+  textFrame.parentStory                     Story that this frame belongs to
+  textFrame.nextTextFrame                   Next frame in thread chain
+  textFrame.previousTextFrame               Previous frame in thread chain
+  text.parentTextFrames                     Array of frames containing a text range
+  textFrame.textFramePreferences            Threading, columns, inset, auto-size
+
+## Styles & Style Groups
+  doc.paragraphStyles                       Paragraph styles (top level)
+  doc.characterStyles                       Character styles (top level)
+  doc.objectStyles                          Object styles (top level)
+  doc.allParagraphStyles                    All para styles (flat, incl. groups) [readonly]
+  doc.allCharacterStyles                    All char styles (flat, incl. groups) [readonly]
+  doc.paragraphStyleGroups                  Paragraph style group folders
+  doc.characterStyleGroups                  Character style group folders
+  doc.objectStyleGroups                     Object style group folders
+  doc.paragraphStyles.itemByName('X')       Access style by name
+  obj.appliedParagraphStyle                 Style applied to text/paragraph
+  obj.appliedCharacterStyle                 Style applied to text/characters
+  obj.appliedObjectStyle                    Style applied to a page item
+
+## Layers
+  doc.layers                                All layers
+  doc.activeLayer                           Currently active layer
+  item.itemLayer                            Layer an item lives on (read/write)
+  doc.layers.itemByName('X')               Access layer by name
+
+## Geometry & Bounds
+  item.geometricBounds                      [top, left, bottom, right] in doc units
+  item.visibleBounds                        Bounds including stroke weight
+
+## Coordinate Spaces & Transformations
+  // InDesign uses a matrix-based transformation system.
+  // Every page item has its own coordinate space (INNER), and transformations
+  // describe how INNER maps to PARENT, SPREAD, PAGE, or PASTEBOARD.
+
+  // CoordinateSpaces:
+  //   INNER_COORDINATES      Item's own local space
+  //   PARENT_COORDINATES     Relative to parent (group, page, spread)
+  //   SPREAD_COORDINATES     Relative to the spread origin
+  //   PAGE_COORDINATES       Relative to the page origin
+  //   PASTEBOARD_COORDINATES Absolute pasteboard space
+
+  // AnchorPoints (reference points for transforms):
+  //   TOP_LEFT_ANCHOR, TOP_CENTER_ANCHOR, TOP_RIGHT_ANCHOR,
+  //   CENTER_LEFT_ANCHOR, CENTER_ANCHOR, CENTER_RIGHT_ANCHOR,
+  //   BOTTOM_LEFT_ANCHOR, BOTTOM_CENTER_ANCHOR, BOTTOM_RIGHT_ANCHOR
+
+  // Move items:
+  item.move(undefined, [deltaX, deltaY])    Relative move by offset
+  item.move([x, y])                         Absolute move to position
+
+  // Resize items:
+  item.resize(CoordinateSpaces.INNER_COORDINATES,
+    AnchorPoint.CENTER_ANCHOR,
+    ResizeMethods.MULTIPLYING_CURRENT_DIMENSIONS_BY,
+    [scaleX, scaleY])
+
+  // Create and apply a transformation matrix:
+  var matrix = app.transformationMatrices.add({
+    counterclockwiseRotationAngle: 45,
+    horizontalScaleFactor: 1.5,
+    verticalScaleFactor: 1.5,
+    horizontalTranslation: 10,
+    verticalTranslation: 20
+  });
+  item.transform(CoordinateSpaces.PASTEBOARD_COORDINATES,
+    AnchorPoint.CENTER_ANCHOR, matrix);
+
+  // Resolve: get position of an anchor in a given coordinate space
+  item.resolve(AnchorPoint.CENTER_ANCHOR,
+    CoordinateSpaces.SPREAD_COORDINATES)[0]   // returns [[x, y]]
+
+  // Read current transform values:
+  item.transformValuesOf(CoordinateSpaces.PARENT_COORDINATES)
+  // Returns TransformationMatrix array (rotation, scale, shear, translation)
+
+## Swatches & Colors
+  doc.swatches                              All swatches (colors + gradients)
+  doc.colors                                Color swatches only
+  doc.gradients                             Gradient swatches only
+  doc.swatches.itemByName('X')              Access swatch by name
+  item.fillColor                            Fill swatch (read/write)
+  item.strokeColor                          Stroke swatch (read/write)
+  item.strokeWeight                         Stroke weight in points
+  item.opacity                              Opacity 0-100
+
+## Parent Navigation Principle
+  item.parent                               Direct parent (group, page, spread, ...)
+  item.parentPage                           Page containing the item (null if pasteboard)
+  text.parentStory                          Story containing the text
+  text.parentTextFrames                     Array of frames containing the text range
+  insertionPoint.parentTextFrame            Frame at insertion point
+
+## Groups
+  container.groups                          Group collection
+  group.pageItems                           Direct children of group
+  group.allPageItems                        All items recursive inside group
+  group.ungroup()                           Ungroup the group
+
+## Find/Change (Text & GREP)
+  // ALWAYS clear prefs first:
+  app.findTextPreferences = NothingEnum.NOTHING;
+  app.changeTextPreferences = NothingEnum.NOTHING;
+  app.findTextPreferences.findWhat = "old";
+  app.changeTextPreferences.changeTo = "new";
+  var results = doc.changeText();    // returns changed items
+  __result = {replaced: results.length};
+
+  // GREP find/change:
+  app.findGrepPreferences = NothingEnum.NOTHING;
+  app.changeGrepPreferences = NothingEnum.NOTHING;
+  app.findGrepPreferences.findWhat = "\\\\d+";  // regex
+  var found = doc.findGrep();
+  __result = {found: found.length};
+
+  // findChangeGrepOptions / findChangeTextOptions:
+  app.findChangeGrepOptions.includeLockedLayersForFind = false;
+  app.findChangeGrepOptions.includeLockedStoriesForFind = false;
+  app.findChangeGrepOptions.includeMasterPages = false;
+
+## Export
+  // PDF with preset:
+  var preset = app.pdfExportPresets.itemByName('[High Quality Print]');
+  doc.exportFile(ExportFormat.PDF_TYPE, File('/path/output.pdf'), false, preset);
+
+  // PDF with custom prefs:
+  app.pdfExportPreferences.pageRange = "1-5";
+  doc.exportFile(ExportFormat.PDF_TYPE, File('/path/output.pdf'));
+
+  // JPEG:
+  app.jpegExportPreferences.jpegQuality = JPEGOptionsQuality.MAXIMUM;
+  doc.exportFile(ExportFormat.JPG, File('/path/output.jpg'));
+
+  // PNG:
+  doc.exportFile(ExportFormat.PNG_FORMAT, File('/path/output.png'));
+  // app.pngExportPreferences for PNG settings
+
+  // HTML:
+  doc.exportFile(ExportFormat.HTML_FPG, File('/path/output.html'));
+  // app.htmlExportPreferences for HTML settings
+
+## Hyperlinks
+  doc.hyperlinks                            All hyperlinks
+  doc.hyperlinkTextSources                  Text-based link sources
+  doc.hyperlinkURLDestinations              URL destinations
+
+## Preferences
+  doc.viewPreferences                       Measurement units, rulers, guides display
+  doc.textFramePreferences                  Default text frame settings
+  doc.guidePreferences                      Guide display and behavior
+  doc.gridPreferences                       Grid settings
+  doc.adjustLayoutPreferences               Adjust layout rules
+  doc.documentPreferences                   Page size, facing pages, page count
+  app.generalPreferences                    Application-wide preferences
+  app.pdfExportPreferences                  PDF export settings
+  app.jpegExportPreferences                 JPEG export settings
+  app.pngExportPreferences                  PNG export settings
+  app.htmlExportPreferences                 HTML export settings
+
+## Guides
+  page.guides                               Guides on a page
+  page.guides.add()                         Add a guide
+  guide.orientation                         HorizontalOrVertical.HORIZONTAL / VERTICAL
+  guide.location                            Position in document units
+
+## Common ExtendScript Gotchas
+  - geometricBounds order: [top, left, bottom, right] (NOT x,y,w,h)
+  - NothingEnum.NOTHING to clear find/change prefs (REQUIRED before each search)
+  - ExtendScript is ES3: no let/const, no arrow functions, no template literals
+  - File paths: new File('/c/path/to/file') or File('~/Desktop/file.pdf')
+  - Check collection.length before indexing to avoid errors
+  - try/catch around .parentPage (null for items on pasteboard)
+  - Assign to __result (no return statement in run_jsx)
+  - Use everyItem() for bulk ops (see Collection Patterns in server instructions)
+"""
+
+
+@mcp.tool()
+def get_quick_reference() -> str:
+    """Get a comprehensive DOM cheatsheet for InDesign ExtendScript.
+
+    Call this BEFORE writing complex JSX scripts to see common DOM
+    access patterns, object hierarchy, and property names. This saves
+    multiple DOM lookup calls. Covers: document navigation, page items,
+    images, text, styles, geometry, transformations, layers, colors,
+    find/change, export, and common gotchas.
+    """
+    return _QUICK_REFERENCE
 
 
 # ---------------------------------------------------------------------------

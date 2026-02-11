@@ -43,7 +43,11 @@ mcp = FastMCP(
         "This server provides access to the Adobe InDesign ExtendScript Object Model. "
         "Use these tools to look up classes, properties, methods, enums, and inheritance "
         "relationships in the InDesign DOM. This helps when writing or debugging "
-        "InDesign ExtendScript code."
+        "InDesign ExtendScript code.\n\n"
+        "TIP: For common DOM patterns (navigation, page items, images, text, styles, "
+        "geometry, find/change, export), the InDesign Exec MCP provides a "
+        "get_quick_reference tool that returns a comprehensive cheatsheet. "
+        "Check that first -- it may save you multiple lookups here."
     ),
 )
 
