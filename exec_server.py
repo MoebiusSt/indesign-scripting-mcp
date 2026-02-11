@@ -120,6 +120,101 @@ Do NOT use `return` — the wrapper handles that.
     tf.contents = "Hello from the Agent";
     __result = {id: tf.id, bounds: tf.geometricBounds};
 
+## Collection Patterns (PREFER over loops)
+
+InDesign collections support **collective specifiers** via `everyItem()` and direct
+accessors like `itemByName()`, `itemByID()`, `itemByRange()`.  These are vastly more
+efficient than loops because they send ONE command across the scripting bridge
+instead of N separate round-trips.
+
+**RULE: Always use collection methods when possible. Only fall back to loops when
+each element needs a different value.**
+
+### Decision Matrix
+
+| Situation | Use | Example |
+|---|---|---|
+| Same property on ALL items | `everyItem().prop = x` | `doc.rectangles.everyItem().label = "tagged"` |
+| Same method on ALL items | `everyItem().method()` | `doc.pages[0].textFrames.everyItem().move(undefined, [10, 10])` |
+| Set multiple properties at once | `everyItem().properties = {...}` | See example below |
+| Read ALL values (returns Array) | `everyItem().prop` | `__result = doc.rectangles.everyItem().label` |
+| Single element by name | `itemByName("x")` | `doc.paragraphStyles.itemByName("Heading 1")` |
+| Single element by ID | `itemByID(n)` | `doc.textFrames.itemByID(12345)` |
+| Range of elements | `itemByRange(a, b)` | `doc.pages.itemByRange(0, 4)` |
+| First / last / middle | `firstItem()` / `lastItem()` | `doc.stories.firstItem().contents` |
+| Nested bulk access | chain `everyItem()` | `doc.stories.everyItem().paragraphs.everyItem().appliedParagraphStyle` |
+| **Different value per element** | **Loop + getElements()** | See loop example below |
+| **Structure changes during iteration** | **Loop backwards** | Deleting items shifts indices |
+| **Text ranges after text edits** | **Re-resolve specifier** | Char-index ranges go stale |
+
+### Efficient Examples (everyItem)
+
+    // Bulk property write — ONE bridge crossing
+    doc.stories.everyItem().tables.everyItem().properties = {
+        topBorderStrokeColor: "Black",
+        bottomBorderStrokeColor: "Black"
+    };
+
+    // Append text to every story's last insertion point
+    doc.stories.everyItem().insertionPoints.lastItem().contents = "!";
+
+    // Read all page names in one call (returns Array)
+    __result = doc.pages.everyItem().name;
+
+    // Navigate all layout windows to page 26
+    app.documents.everyItem().layoutWindows.everyItem().activePage =
+        app.documents.everyItem().pages.itemByName("26");
+
+### Efficient Examples (Direct Accessors)
+
+    // By name — no loop needed
+    var style = doc.paragraphStyles.itemByName("Heading 1");
+    var swatch = doc.swatches.itemByName("Red");
+
+    // By ID — direct access
+    var frame = doc.textFrames.itemByID(12345);
+
+    // By range — subset without loop
+    var firstFive = doc.pages.itemByRange(0, 4);
+
+### When Loops ARE Required
+
+    // Different colour per rectangle — loop is unavoidable
+    var recs = doc.rectangles.everyItem().getElements();
+    var colors = doc.swatches.everyItem().getElements();
+    for (var i = 0; i < recs.length; i++) {
+        recs[i].fillColor = colors[i % colors.length];
+    }
+    __result = {colored: recs.length};
+
+    // Deleting items — loop BACKWARDS to avoid index shift
+    var items = doc.rectangles.everyItem().getElements();
+    for (var i = items.length - 1; i >= 0; i--) {
+        if (items[i].label === "delete_me") items[i].remove();
+    }
+
+### Critical Gotchas
+
+1. **Any property access resolves the specifier** into a snapshot.
+   New items added after resolution won't be seen. Call `getElements()`
+   to re-resolve if the collection changed.
+
+2. **everyItem() on an empty collection** returns `isValid = true`
+   but produces empty results — no error is thrown.
+
+3. **Text specifiers** (Characters, Words, Paragraphs) use character-index
+   ranges internally. After text insertion/deletion the ranges go stale.
+   Dynamic specifiers (`firstItem()`, `lastItem()`) re-evaluate automatically;
+   resolved ones do not.
+
+4. **Nested everyItem()** works and is powerful:
+   `doc.stories.everyItem().paragraphs.everyItem().appliedParagraphStyle`
+   reads ALL paragraph styles of ALL stories in ONE call.
+
+5. **getElements()** converts a collective specifier to a plain JS Array.
+   Use it when you need to loop with individual values, or to refresh
+   a stale specifier.
+
 ## Safety Notes
 - DOM objects in __result are serialised as specifier strings, not expanded.
 - Properties that crash InDesign (scriptPreferences.properties, shadow-settings
