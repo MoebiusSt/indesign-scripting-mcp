@@ -1,5 +1,13 @@
 # InDesign Scripting MCP (DOM + Exec)
 
+<div align="center">
+  <img src="docs/hero-example.png" alt="Op-Art generated in InDesign via MCP" width="600">
+  <br>
+  <em>Done with a single prompt from within Claude Desktop in 20 seconds.</em>
+</div>
+
+<br>
+
 Two MCP servers for Adobe InDesign:
 
 - **InDesign DOM MCP** (`server.py`): query the complete InDesign ExtendScript Object Model (classes, properties, methods, enums, inheritance) from a local SQLite database built from the OMV XML.
