@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "mcp>=1.0.0",
+# ]
+# ///
 """
 InDesign DOM MCP Server.
 
@@ -15,7 +21,11 @@ Provides 9 tools for querying the InDesign Object Model:
 
 import json
 import os
+import sys
 from pathlib import Path
+
+# Add script directory to sys.path so db module can be imported
+sys.path.insert(0, str(Path(__file__).parent))
 
 from mcp.server.fastmcp import FastMCP
 
