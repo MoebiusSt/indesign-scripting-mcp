@@ -44,7 +44,18 @@ mcp = FastMCP(
         "Do NOT use return statements — the wrapper handles serialisation.\n"
         "Always verify results after modifications using eval_expression or get_document_info.\n"
         "Use the InDesign DOM MCP server to look up classes, properties and methods "
-        "before writing JSX code."
+        "before writing JSX code.\n\n"
+        "PERFORMANCE: InDesign has a powerful Collection API. ALWAYS prefer collection methods "
+        "over manual for-loops:\n"
+        "  - everyItem() for bulk operations: collection.everyItem().prop = value (ONE command for ALL items)\n"
+        "  - itemByName('x'), itemByID(n), itemByRange(a,b) for direct access without loops\n"
+        "  - Nested: doc.stories.everyItem().paragraphs.everyItem().appliedParagraphStyle (reads ALL in ONE call)\n"
+        "  - Only use loops when each element needs a DIFFERENT value (use getElements() first)\n"
+        "  Example — set all docs to page 26 WITHOUT a loop:\n"
+        "    app.documents.everyItem().layoutWindows.everyItem().activePage = "
+        "app.documents.everyItem().pages.itemByName('26');\n"
+        "  Example — read all page names in one call:\n"
+        "    __result = doc.pages.everyItem().name;  // returns Array"
     ),
 )
 
@@ -284,6 +295,16 @@ def run_jsx(
     Example:
         var doc = app.activeDocument;
         __result = {name: doc.name, pages: doc.pages.length};
+
+    PERFORMANCE — prefer InDesign Collection methods over loops:
+        // GOOD: bulk operation via everyItem() — one command for all items
+        doc.textFrames.everyItem().label = "processed";
+        __result = doc.pages.everyItem().name;  // reads all names at once
+        // GOOD: direct access without loop
+        var style = doc.paragraphStyles.itemByName("Heading 1");
+        // BAD: manual loop when everyItem() would work
+        for (var i = 0; i < doc.textFrames.length; i++) { doc.textFrames[i].label = "processed"; }
+    Only use loops when each element needs a DIFFERENT value.
 
     Args:
         code: The JSX code to execute. Assign to __result to return data.
