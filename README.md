@@ -1,9 +1,9 @@
 # InDesign Scripting MCP (DOM + Exec)
 
 <div align="center">
-  <img src="docs/screenshot_indesign_mcp_first-test.jpg" alt="Op-Art generated in InDesign via MCP" width="600">
+  <img src="docs/screenshot_indesign_mcp_first-test2.jpg" alt="Op-Art generated in InDesign via MCP" width="600">
   <br>
-  <em>Done with a single prompt from within Claude Desktop in 20 seconds.</em>
+  <em>Done with a single prompt from within Claude Desktop in 20 seconds (and some tinkering afterwards).</em>
 </div>
 
 <br>
