@@ -24,9 +24,10 @@ Thumbs.db
 omv$*.xml
 /sources/
 
+
 # MCP bundles (internal/dev)
 *.mcpb
 
 # Internal development documents
-indesign-dom-mcp-devplan-v2.md
+indesign_scripting_MCP.code-workspace
 exec-refactoring-log.md
