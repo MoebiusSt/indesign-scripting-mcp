@@ -37,3 +37,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## extendscriptApiDocTransformations (Gregor Fellenz)
+
+- Project: `https://github.com/grefel/extendscriptApiDocTransformations`
+- License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (repository license)
+- Scope in this repository:
+  - Conceptual learnings only (no direct code import from XSLT files)
+  - Merge strategy for multiple XML sources (`indesign.xml`, `javascript.xml`, `scriptui.xml`)
+  - Early namespace normalization in parsing pipeline
+  - Awareness of ScriptUI name collisions vs DOM classes
+  - Reference-validation mindset for cross-source links

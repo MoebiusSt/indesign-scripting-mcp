@@ -10,7 +10,7 @@
 
 Two MCP servers for Adobe InDesign:
 
-- **InDesign DOM MCP** (`server.py`): query the complete InDesign ExtendScript Object Model (classes, properties, methods, enums, inheritance) from a local SQLite database built from the OMV XML.
+- **InDesign DOM MCP** (`server.py`): query InDesign DOM + ExtendScript JavaScript Core + ScriptUI classes from a local SQLite database built from XML sources.
 - **InDesign Exec MCP** (`exec_server.py`): execute ExtendScript (JSX) in a running InDesign instance via Windows COM/OLE and return structured JSON results.
 
 ## What This Is
@@ -34,8 +34,10 @@ This project exposes two complementary servers to agents:
 
 ```mermaid
 flowchart LR
-  OMV_XML[OMV DOM XML] --> Parser[parser.py]
-  Parser --> SQLite[(indesign_dom.db)]
+  DOM_XML["omv$indesign-*.xml"] --> Parser[parser.py]
+  JS_XML[javascript.xml] --> Parser
+  SUI_XML[scriptui.xml] --> Parser
+  Parser --> SQLite[(extendscript.db)]
   SQLite --> DomServer["server.py (InDesign DOM MCP)"]
   Agent[Agent] --> DomServer
   Agent --> ExecServer["exec_server.py (InDesign Exec MCP)"]
@@ -57,15 +59,17 @@ Core files:
 
 ### InDesign DOM MCP (`server.py`)
 
-- `lookup_class(name)`
-- `get_properties(class_name, filter?, include_inherited?)`
-- `get_methods(class_name, filter?, include_inherited?)`
-- `get_method_detail(class_name, method_name)`
-- `get_enum_values(enum_name)`
-- `get_hierarchy(class_name)`
-- `search_dom(query)`
-- `list_classes(suite?, type=all)`
+- `lookup_class(name, source?)`
+- `get_properties(class_name, source?, filter?, include_inherited?)`
+- `get_methods(class_name, source?, filter?, include_inherited?)`
+- `get_method_detail(class_name, method_name, source?)`
+- `get_enum_values(enum_name, source?)`
+- `get_hierarchy(class_name, source?)`
+- `search_dom(query, source?)`
+- `list_classes(suite?, type=all, source?)`
 - `dom_info()`
+- `list_sources()`
+- `knowledge_overview()`
 
 ### InDesign Exec MCP (`exec_server.py`)
 
@@ -77,14 +81,28 @@ Core files:
 
 ## Agentic Usage / Key Patterns
 
-### 1) DOM lookup → code generation → execution
+### 1) Knowledge overview -> lookup -> code generation -> execution
 
 1. Use DOM MCP to look up the correct class/method signature.
-2. Write JSX that assigns a plain value to `__result` (do not `return`).
-3. Execute with `run_jsx` and verify with `eval_expression` or `get_document_info`.
-4. If needed, rollback with `undo`.
+2. For ambiguous class names (`Window`, `Group`, `Panel`, `Event`) pass `source="dom"` or `source="scriptui"`.
+3. For ExtendScript-specific APIs (`UnitValue`, `$`, `File`, `Folder`, `Socket`, `XML`, `XMLList`) use `source="javascript"`.
+4. Write JSX that assigns a plain value to `__result` (do not `return`).
+5. Execute with `run_jsx` and verify with `eval_expression` or `get_document_info`.
+6. If needed, rollback with `undo`.
 
-### 2) `__result` convention
+### 2) Recommended agent boot sequence
+
+1. `knowledge_overview()`
+2. `list_sources()`
+3. `search_dom(query, source=...)`
+4. `lookup_class(...)` / `get_method_detail(...)`
+5. `indesign-exec` tools (`run_jsx`, `eval_expression`, `undo`)
+
+### 3) ScriptUI positioning
+
+ScriptUI remains documented for legacy scripts and small dialogs. For new UI-heavy development, prefer a modern UXP plugin.
+
+### 4) `__result` convention
 
 The wrapper serializes `__result` to JSON. Example:
 
@@ -93,14 +111,54 @@ var doc = app.activeDocument;
 __result = { name: doc.name, pages: doc.pages.length };
 ```
 
-### 3) Undo grouping
+### 5) Undo grouping
 
 Use `undo_mode="entire"` and a descriptive `undo_name` so one Ctrl+Z reverts the whole operation.
 
-### 4) JSON polyfill / safe serialization
+### 6) JSON polyfill / safe serialization
 
 ExtendScript engines can lack `JSON.stringify` or crash when traversing DOM objects.
 This project always provides `__safeStringify()` (and installs `JSON.stringify` if missing).
+
+## Data Sources
+
+The parser supports three XML sources:
+
+- InDesign DOM OMV XML (`omv$indesign-*.xml`)
+- ExtendScript JavaScript Core (`javascript.xml`)
+- ScriptUI (`scriptui.xml`)
+
+Common source locations:
+
+- macOS:
+  - `/Library/Application Support/Adobe/Scripting Dictionaries CC/CommonFiles`
+  - `~/Library/Preferences/ExtendScript Toolkit/4.0/omv$indesign-9.064$9.0.xml`
+- Windows:
+  - `\\Users\\[Username]\\AppData\\Roaming\\Adobe\\ExtendScript Toolkit\\4.0\\omv$indesign-10.064$10.0.xml`
+  - `C:\\Program Files (x86)\\Common Files\\Adobe\\Scripting Dictionaries CC\\CommonFiles`
+
+## Build Commands
+
+### Build all sources (recommended)
+
+```bash
+python manage.py build-all --dom "C:\\path\\to\\omv$indesign-21.064$21.0.xml" --js "C:\\path\\to\\javascript.xml" --sui "C:\\path\\to\\scriptui.xml"
+```
+
+### Build single source
+
+```bash
+python manage.py build --source dom --xml "C:\\path\\to\\omv$indesign-21.064$21.0.xml"
+```
+
+### Validate source coverage
+
+```bash
+python manage.py validate --expect-sources dom,javascript,scriptui
+```
+2. Write JSX that assigns a plain value to `__result` (do not `return`).
+3. Execute with `run_jsx` and verify with `eval_expression` or `get_document_info`.
+4. If needed, rollback with `undo`.
 
 ## Prerequisites
 
@@ -116,10 +174,10 @@ This project always provides `__safeStringify()` (and installs `JSON.stringify` 
 ### 1) Create/update the DOM database
 
 ```bash
-python manage.py build --xml "C:\\path\\to\\omv$indesign-21.064$21.0.xml"
+python manage.py build-all --dom "C:\\path\\to\\omv$indesign-21.064$21.0.xml" --js "C:\\path\\to\\javascript.xml" --sui "C:\\path\\to\\scriptui.xml"
 ```
 
-The resulting `indesign_dom.db` is generated locally and should not be committed.
+The resulting `extendscript.db` is generated locally and should not be committed.
 
 ### 2) Run the MCP servers (stdio transport)
 
@@ -164,12 +222,18 @@ Add two servers that run from this repo directory (use stdio transport):
 
 Add the same server definitions to `claude_desktop_config.json` (the exact file location depends on your OS install).
 
-## Updating the DOM Database from the Adobe ESTK Object Model Viewer XML-Source
+## Updating the Database
 
-Find the latest OMV DOM xml file for your latest Indesign Version, then 
+To update one source:
 
 ```bash
-python manage.py update --xml "C:\\path\\to\\omv$indesign-22.064$22.0.xml"
+python manage.py update --source dom --xml "C:\\path\\to\\omv$indesign-22.064$22.0.xml"
+```
+
+To rebuild all three sources:
+
+```bash
+python manage.py build-all --dom "C:\\path\\to\\omv$indesign-22.064$22.0.xml" --js "C:\\path\\to\\javascript.xml" --sui "C:\\path\\to\\scriptui.xml"
 ```
 
 ## License
@@ -181,3 +245,11 @@ MIT. See `LICENSE`.
 This repository references safety/serialization patterns inspired by IdExtenso (Marc Autret, MIT).
 See `THIRD_PARTY_NOTICES.md`.
 
+## Acknowledgements
+
+- Gregor Fellenz: `https://github.com/grefel/extendscriptApiDocTransformations`
+- This project adopts conceptual learnings from that repository:
+  - XML merge strategy across InDesign DOM + JavaScript + ScriptUI
+  - namespace normalization before parsing
+  - explicit handling of ScriptUI naming collisions
+  - reference-aware transformation mindset

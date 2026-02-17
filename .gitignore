@@ -1,5 +1,6 @@
 # Generated database
 indesign_dom.db
+extendscript.db
 *.db-wal
 *.db-shm
 
@@ -21,6 +22,7 @@ Thumbs.db
 
 # InDesign DOM source XML (internal/dev)
 omv$*.xml
+/sources/
 
 # MCP bundles (internal/dev)
 *.mcpb
