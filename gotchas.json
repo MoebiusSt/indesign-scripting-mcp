@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "scriptui-palette-targetengine",
+      "category": "scriptui",
+      "severity": "blocker",
+      "triggers": ["palette", "modeless", "window", "#targetengine", "scriptui"],
+      "problem": "Modeless palette windows can close immediately after script execution.",
+      "solution": "Use #targetengine with a persistent session name before creating palette windows.",
+      "example_bad": "var w = new Window('palette', 'Title');\nw.show();",
+      "example_good": "#targetengine 'mySession';\nvar w = new Window('palette', 'Title');\nw.show();",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "scriptui-event-engine-scope",
+      "category": "scriptui",
+      "severity": "warning",
+      "triggers": ["afterSelectionChanged", "event listener", "engine", "scope", "scriptui"],
+      "problem": "Event listeners can run in a different engine context and lose closure state.",
+      "solution": "Use shared state on persistent engine objects or prefer IdleTask polling for selection monitoring.",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "move-by-unit-strings",
+      "category": "extendscript",
+      "severity": "warning",
+      "triggers": ["move", "by", "UnitValue", "offset", "position"],
+      "problem": "The move() by argument can fail when UnitValue objects are passed directly.",
+      "solution": "Pass numeric offsets or unit strings (for example '10mm') that match InDesign expectations.",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "geometricbounds-order",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": ["geometricBounds", "bounds", "top", "left", "bottom", "right"],
+      "problem": "geometricBounds is often confused with x,y,width,height.",
+      "solution": "Always use geometricBounds as [top, left, bottom, right].",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "findchange-clear-preferences",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": ["findTextPreferences", "findGrepPreferences", "NothingEnum", "find/change", "grep"],
+      "problem": "Find/change operations can produce incorrect results when preferences are not reset.",
+      "solution": "Reset find and change preferences to NothingEnum.NOTHING before each find/change operation.",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "extendscript-es3-only",
+      "category": "extendscript",
+      "severity": "warning",
+      "triggers": ["let", "const", "arrow function", "template literal", "es3"],
+      "problem": "ExtendScript does not support modern JavaScript syntax.",
+      "solution": "Use ES3-compatible syntax (var, classic functions, string concatenation).",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "file-path-constructor",
+      "category": "extendscript",
+      "severity": "tip",
+      "triggers": ["File(", "path", "exportFile", "link", "filesystem"],
+      "problem": "File path handling can fail with raw path assumptions.",
+      "solution": "Construct file references explicitly with File('/path/file') or File('~/Desktop/file').",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "collection-length-before-index",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": ["collection", "length", "index", "out of range"],
+      "problem": "Direct indexing into empty collections causes runtime errors.",
+      "solution": "Check collection.length before reading collection[index].",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "parentpage-null-pasteboard",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": ["parentPage", "pasteboard", "null", "page item"],
+      "problem": "parentPage is null for items on the pasteboard.",
+      "solution": "Wrap parentPage access in try/catch or explicit null checks.",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "runjsx-result-convention",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": ["run_jsx", "__result", "return", "serialization"],
+      "problem": "Using return instead of __result yields missing or unexpected outputs.",
+      "solution": "Assign output values to __result and avoid return statements in run_jsx payloads.",
+      "added": "2026-02-17",
+      "source": "community"
+    },
+    {
+      "id": "prefer-everyitem-bulk-ops",
+      "category": "execution",
+      "severity": "tip",
+      "triggers": ["everyItem", "loop", "bulk", "performance", "collection"],
+      "problem": "Manual loops create unnecessary bridge round-trips for uniform operations.",
+      "solution": "Use collection APIs (everyItem, itemByName, itemByID, itemByRange) whenever possible.",
+      "added": "2026-02-17",
+      "source": "community"
+    }
+  ]
+}

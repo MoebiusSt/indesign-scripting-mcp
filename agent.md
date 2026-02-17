@@ -99,6 +99,15 @@ For ExtendScript-specific features, prefer `source="javascript"`:
 - Execution: `run_jsx(code, undo_name?, undo_mode?)`
 - Read-only checks: `get_document_info()`, `get_selection(detail_level?)`, `eval_expression(expression)`
 - Recovery: `undo(steps?)`
+- Learning loop: `report_learning(...)`, `get_gotchas(context?)`, `get_quick_reference()`
+
+## Community Gotchas Workflow
+
+- Curated knowledge file: `gotchas.json` (committed, PR-friendly)
+- Local submission queue: `submissions/pending.jsonl` (not committed)
+- Submission tool: `report_learning(problem, solution, triggers, ...)`
+- Review command: `python manage.py review-submissions`
+- Promotion path: pending submission -> review -> `gotchas.json` -> commit/PR
 
 ## Known Pain Points and Special Handling
 

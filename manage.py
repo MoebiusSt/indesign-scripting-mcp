@@ -9,12 +9,16 @@ Commands:
   validate  [--xml <file>]   Validate database against XML
   serve                     Start MCP server
   info                      Show database statistics
+  review-submissions        Promote pending learnings to gotchas.json
 """
 
 import argparse
+import json
 import os
+import re
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 import parser as dom_parser
@@ -23,6 +27,8 @@ import db as dom_db
 BASE_DIR = Path(__file__).parent
 DEFAULT_DB = BASE_DIR / "extendscript.db"
 LEGACY_DB = BASE_DIR / "indesign_dom.db"
+GOTCHAS_PATH = BASE_DIR / "gotchas.json"
+SUBMISSIONS_PATH = BASE_DIR / "submissions" / "pending.jsonl"
 
 
 def _default_db_path() -> Path:
@@ -383,6 +389,157 @@ def _run_regression_checks(db_path: str):
         print("    FAIL: lookup_class('Window') should return multiple sources")
 
 
+def _slugify(text: str) -> str:
+    """Build a stable slug for gotcha IDs."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "learning"
+
+
+def _next_unique_id(base: str, existing: set[str]) -> str:
+    """Return unique ID by suffixing with numbers when needed."""
+    if base not in existing:
+        return base
+    idx = 2
+    while f"{base}-{idx}" in existing:
+        idx += 1
+    return f"{base}-{idx}"
+
+
+def _load_gotchas_file() -> dict:
+    """Load gotchas file or return default structure."""
+    if not GOTCHAS_PATH.exists():
+        return {"version": 1, "entries": []}
+    with GOTCHAS_PATH.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        return {"version": 1, "entries": []}
+    if "entries" not in data or not isinstance(data["entries"], list):
+        data["entries"] = []
+    if "version" not in data:
+        data["version"] = 1
+    return data
+
+
+def _safe_write_text(path: Path, content: str):
+    """Write text robustly on Windows sync folders."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8")
+        return
+    except OSError:
+        # Fallback path for environments where Path.write_text intermittently fails.
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+
+def _print_submission(idx: int, item: dict):
+    """Print pending learning submission."""
+    print("-" * 72)
+    print(f"Submission #{idx}")
+    print(f"  Category: {item.get('category', '(missing)')}")
+    print(f"  Severity: {item.get('severity', '(missing)')}")
+    print(f"  Triggers: {item.get('triggers', [])}")
+    print(f"  Problem:  {item.get('problem', '(missing)')}")
+    print(f"  Solution: {item.get('solution', '(missing)')}")
+    if item.get("error_message"):
+        print(f"  Error:    {item.get('error_message')}")
+    if item.get("jsx_context"):
+        preview = str(item.get("jsx_context")).replace("\n", "\\n")
+        print(f"  JSX:      {preview[:180]}")
+
+
+def cmd_review_submissions(args):
+    """Review pending learning submissions and promote approved ones."""
+    if not SUBMISSIONS_PATH.exists():
+        print(f"No submission file found: {SUBMISSIONS_PATH}")
+        return 0
+
+    raw_lines = SUBMISSIONS_PATH.read_text(encoding="utf-8").splitlines()
+    lines = [ln for ln in raw_lines if ln.strip()]
+    if not lines:
+        print("No pending submissions.")
+        return 0
+
+    gotchas = _load_gotchas_file()
+    entries = gotchas.get("entries", [])
+    existing_ids = {str(e.get("id", "")).strip() for e in entries if isinstance(e, dict)}
+
+    approved = 0
+    rejected = 0
+    kept_lines: list[str] = []
+    pending_tail: list[str] = []
+    quit_early = False
+
+    parsed_items: list[tuple[str, dict | None]] = []
+    for ln in lines:
+        try:
+            parsed_items.append((ln, json.loads(ln)))
+        except Exception:
+            parsed_items.append((ln, None))
+
+    for idx, (raw, item) in enumerate(parsed_items, start=1):
+        if quit_early:
+            pending_tail.append(raw)
+            continue
+        if item is None or not isinstance(item, dict):
+            print(f"Skipping invalid JSON line #{idx}; keeping it in pending queue.")
+            kept_lines.append(raw)
+            continue
+
+        _print_submission(idx, item)
+        choice = input("Action [a=approve, s=skip, r=reject, q=quit] (default: s): ").strip().lower() or "s"
+        if choice == "q":
+            quit_early = True
+            pending_tail = [raw]
+            continue
+        if choice == "r":
+            rejected += 1
+            continue
+        if choice != "a":
+            kept_lines.append(raw)
+            continue
+
+        problem = str(item.get("problem", "")).strip()
+        solution = str(item.get("solution", "")).strip()
+        triggers = item.get("triggers", [])
+        if not problem or not solution or not isinstance(triggers, list) or not triggers:
+            print("  Cannot approve: missing required fields (problem/solution/triggers). Keeping pending.")
+            kept_lines.append(raw)
+            continue
+
+        base_id = _slugify(problem)[:64]
+        entry_id = _next_unique_id(base_id, existing_ids)
+        existing_ids.add(entry_id)
+        approved_entry = {
+            "id": entry_id,
+            "category": str(item.get("category", "extendscript")),
+            "severity": str(item.get("severity", "warning")),
+            "triggers": [str(t).strip() for t in triggers if str(t).strip()],
+            "problem": problem,
+            "solution": solution,
+            "added": date.today().isoformat(),
+            "source": "auto-submission",
+        }
+        if item.get("jsx_context"):
+            approved_entry["example_bad"] = str(item["jsx_context"])
+
+        entries.append(approved_entry)
+        approved += 1
+
+    if pending_tail:
+        kept_lines.extend(pending_tail)
+
+    gotchas["entries"] = entries
+    _safe_write_text(GOTCHAS_PATH, json.dumps(gotchas, indent=2, ensure_ascii=False) + "\n")
+    _safe_write_text(SUBMISSIONS_PATH, ("\n".join(kept_lines) + "\n") if kept_lines else "")
+
+    print("-" * 72)
+    print(f"Review complete. Approved: {approved}, Rejected: {rejected}, Still pending: {len(kept_lines)}")
+    print(f"Updated gotchas file: {GOTCHAS_PATH}")
+    print(f"Pending queue file:   {SUBMISSIONS_PATH}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="InDesign DOM MCP – Management CLI",
@@ -396,6 +553,7 @@ Commands:
   validate  [--xml <file>]   Validate database
   serve                     Start MCP server
   info                      Show database statistics
+  review-submissions        Promote pending learnings to gotchas.json
         """,
     )
 
@@ -460,6 +618,12 @@ Commands:
     p_info = subparsers.add_parser("info", help="Show database statistics")
     p_info.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
 
+    # review-submissions
+    subparsers.add_parser(
+        "review-submissions",
+        help="Review local learning submissions and promote approved ones",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -474,6 +638,7 @@ Commands:
         "validate": cmd_validate,
         "serve": cmd_serve,
         "info": cmd_info,
+        "review-submissions": cmd_review_submissions,
     }
 
     return commands[args.command](args)

@@ -31,3 +31,6 @@ omv$*.xml
 # Internal development documents
 indesign_scripting_MCP.code-workspace
 exec-refactoring-log.md
+
+# Local learning submissions (review queue)
+submissions/*.jsonl

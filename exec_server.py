@@ -8,13 +8,15 @@
 """
 InDesign Exec MCP Server.
 
-Provides 6 tools for executing JSX code in Adobe InDesign via COM/OLE:
+Provides 8 tools for executing JSX code in Adobe InDesign via COM/OLE:
   1. run_jsx             - Execute JSX code with undo grouping
   2. get_document_info   - Query active document overview + active view context
   3. get_selection       - Query current selection
   4. eval_expression     - Evaluate a short expression
   5. undo                - Undo last agent operation(s)
-  6. get_quick_reference - DOM cheatsheet for common access patterns
+  6. report_learning     - Submit local pitfall/best-practice learnings
+  7. get_gotchas         - Retrieve curated gotchas (optionally context-filtered)
+  8. get_quick_reference - DOM cheatsheet for common access patterns
 
 Requires InDesign Desktop running on Windows.
 Uses UndoModes.ENTIRE_SCRIPT to group all operations per call.
@@ -22,7 +24,9 @@ No eval() anywhere -- JSX code is inlined, results serialised via __safeStringif
 """
 
 import json
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add script directory to sys.path so indesign_com can be imported
@@ -31,6 +35,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from mcp.server.fastmcp import FastMCP
 
 import indesign_com as com
+
+BASE_DIR = Path(__file__).parent
+GOTCHAS_PATH = BASE_DIR / "gotchas.json"
+SUBMISSIONS_DIR = BASE_DIR / "submissions"
+SUBMISSIONS_PATH = SUBMISSIONS_DIR / "pending.jsonl"
+
+ALLOWED_LEARNING_CATEGORIES = {"dom", "scriptui", "extendscript", "execution", "serialization"}
+ALLOWED_LEARNING_SEVERITIES = {"blocker", "warning", "tip"}
+SEVERITY_RANK = {"tip": 1, "warning": 2, "blocker": 3}
 
 mcp = FastMCP(
     "InDesign Exec",
@@ -95,7 +108,16 @@ mcp = FastMCP(
         "                doc.gridPreferences, doc.adjustLayoutPreferences, app.generalPreferences\n"
         "  Guides:       page.guides.add(), guide.orientation, guide.location\n"
         "  Hyperlinks:   doc.hyperlinks, doc.hyperlinkTextSources, doc.hyperlinkURLDestinations\n"
-        "For a comprehensive cheatsheet with examples, call the get_quick_reference tool."
+        "For a comprehensive cheatsheet with examples, call the get_quick_reference tool.\n\n"
+        "LEARNING FEEDBACK LOOP:\n"
+        "  - Use report_learning(...) to submit newly discovered bugs, gotchas, and best practices.\n"
+        "  - Use get_gotchas(context?) to retrieve curated gotchas before writing complex JSX.\n"
+        "  - Maintainers can promote local submissions with: python manage.py review-submissions\n\n"
+        "OPERATIONAL POLICY FOR AGENTS (MUST/SHOULD):\n"
+        "  - MUST run get_gotchas(context) before implementing a non-trivial InDesign task.\n"
+        "  - SHOULD call get_quick_reference() once at the start of the first InDesign task in a conversation.\n"
+        "  - MUST use report_learning(...) after a user-reported error/gotcha was resolved and the root cause is clear.\n"
+        "  - SHOULD avoid duplicate reports by checking if an equivalent gotcha already exists."
     ),
 )
 
@@ -136,6 +158,15 @@ Do NOT use `return` — the wrapper handles that.
 3. **Execute**: `run_jsx` with undo_mode="entire" and a descriptive undo_name
 4. **Verify**: `eval_expression` or `get_selection` to check the result
 5. **Rollback**: `undo` if the result is wrong, then try a different approach
+
+## Operational Policy (MUST/SHOULD)
+- **MUST** run `get_gotchas(context)` before implementing non-trivial InDesign tasks.
+- **SHOULD** call `get_quick_reference()` once when the first InDesign task starts in a conversation.
+- **MUST** call `report_learning(...)` after a user-reported bug/gotcha was resolved and root cause + fix are known.
+- **SHOULD** avoid duplicate reports when an equivalent gotcha already exists.
+
+Maintainer promotion command:
+`python manage.py review-submissions`
 
 ## Common Patterns
 
@@ -313,6 +344,52 @@ def _unwrap_result(result: dict) -> dict:
         data = result["result"]
         return {"success": True, **data}
     return result
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC timestamp as ISO8601."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _load_gotcha_entries() -> list[dict]:
+    """Load curated gotcha entries from gotchas.json."""
+    if not GOTCHAS_PATH.exists():
+        return []
+    try:
+        data = json.loads(GOTCHAS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = data.get("entries", [])
+    return entries if isinstance(entries, list) else []
+
+
+def _context_tokens(context: str) -> list[str]:
+    """Tokenize context for lightweight keyword matching."""
+    lowered = context.lower()
+    return [tok for tok in re.split(r"[^a-z0-9_#]+", lowered) if tok]
+
+
+def _score_gotcha_for_context(entry: dict, context: str, tokens: list[str]) -> int:
+    """Return match score for one gotcha against context."""
+    score = 0
+    triggers = entry.get("triggers", [])
+    if not isinstance(triggers, list):
+        return score
+    for trigger in triggers:
+        needle = str(trigger).strip().lower()
+        if not needle:
+            continue
+        if needle in context:
+            score += 2
+            continue
+        if any(needle in token or token in needle for token in tokens):
+            score += 1
+    return score
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text for duplicate detection."""
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +715,184 @@ def undo(steps: int = 1) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: get_quick_reference
+# Tool 6: report_learning
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def report_learning(
+    problem: str,
+    solution: str,
+    triggers: list[str],
+    category: str = "extendscript",
+    severity: str = "warning",
+    error_message: str | None = None,
+    jsx_context: str | None = None,
+) -> str:
+    """Submit a local learning entry for later maintainer review.
+
+    This tool does not update curated knowledge directly. It appends
+    a pending submission to submissions/pending.jsonl. Maintainers can
+    then review and promote accepted learnings into gotchas.json.
+
+    Args:
+        problem: One-line description of the pitfall.
+        solution: One-line actionable solution.
+        triggers: Context keywords used for later matching.
+        category: One of dom|scriptui|extendscript|execution|serialization.
+        severity: One of blocker|warning|tip.
+        error_message: Optional original runtime error text.
+        jsx_context: Optional JSX snippet related to the issue.
+    """
+    if not problem.strip():
+        return _fmt({"success": False, "error": "problem must not be empty"})
+    if not solution.strip():
+        return _fmt({"success": False, "error": "solution must not be empty"})
+    if category not in ALLOWED_LEARNING_CATEGORIES:
+        return _fmt(
+            {
+                "success": False,
+                "error": f"category must be one of: {sorted(ALLOWED_LEARNING_CATEGORIES)}",
+            }
+        )
+    if severity not in ALLOWED_LEARNING_SEVERITIES:
+        return _fmt(
+            {
+                "success": False,
+                "error": f"severity must be one of: {sorted(ALLOWED_LEARNING_SEVERITIES)}",
+            }
+        )
+
+    cleaned_triggers = [str(t).strip() for t in triggers if str(t).strip()]
+    if not cleaned_triggers:
+        return _fmt({"success": False, "error": "triggers must contain at least one non-empty value"})
+
+    normalized_problem = _normalize_text(problem)
+    normalized_solution = _normalize_text(solution)
+    normalized_trigger_set = {str(t).strip().lower() for t in cleaned_triggers}
+
+    for existing in _load_gotcha_entries():
+        existing_problem = _normalize_text(str(existing.get("problem", "")))
+        existing_solution = _normalize_text(str(existing.get("solution", "")))
+        existing_triggers = existing.get("triggers", [])
+        existing_trigger_set = {
+            str(t).strip().lower() for t in existing_triggers if str(t).strip()
+        } if isinstance(existing_triggers, list) else set()
+        same_problem = normalized_problem and normalized_problem == existing_problem
+        same_solution = normalized_solution and normalized_solution == existing_solution
+        trigger_overlap = bool(normalized_trigger_set and existing_trigger_set and normalized_trigger_set & existing_trigger_set)
+        if same_problem or (same_solution and trigger_overlap):
+            return _fmt(
+                {
+                    "success": True,
+                    "duplicate": True,
+                    "message": "Equivalent gotcha already exists; skipping new submission.",
+                    "existing_id": existing.get("id"),
+                }
+            )
+
+    submission = {
+        "timestamp": _utc_now_iso(),
+        "status": "pending",
+        "category": category,
+        "severity": severity,
+        "triggers": cleaned_triggers,
+        "problem": problem.strip(),
+        "solution": solution.strip(),
+        "error_message": (error_message or "").strip() or None,
+        "jsx_context": (jsx_context or "").strip() or None,
+    }
+
+    try:
+        SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        with SUBMISSIONS_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(submission, ensure_ascii=False) + "\n")
+    except Exception as e:
+        return _fmt({"success": False, "error": f"failed to persist submission: {e}"})
+
+    return _fmt(
+        {
+            "success": True,
+            "message": "Learning submitted to local review queue.",
+            "submission_file": str(SUBMISSIONS_PATH),
+            "next_step": "Run `python manage.py review-submissions` to review and promote entries.",
+            "submission": submission,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: get_gotchas
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_gotchas(
+    context: str | None = None,
+    min_severity: str = "tip",
+    top_n: int | None = None,
+) -> str:
+    """Get curated gotchas, optionally filtered by context keywords.
+
+    Args:
+        context: Optional context string (for example "modeless palette move by UnitValue")
+                 used to rank matching gotchas.
+        min_severity: Minimum severity to include: tip|warning|blocker (default: tip).
+        top_n: Optional maximum number of entries to return.
+    """
+    if min_severity not in ALLOWED_LEARNING_SEVERITIES:
+        return _fmt(
+            {
+                "success": False,
+                "error": f"min_severity must be one of: {sorted(ALLOWED_LEARNING_SEVERITIES)}",
+            }
+        )
+    if top_n is not None and top_n <= 0:
+        return _fmt({"success": False, "error": "top_n must be > 0 when provided"})
+
+    entries = _load_gotcha_entries()
+    min_rank = SEVERITY_RANK[min_severity]
+    filtered_entries = [
+        entry
+        for entry in entries
+        if SEVERITY_RANK.get(str(entry.get("severity", "tip")).lower(), 0) >= min_rank
+    ]
+
+    if not context:
+        if top_n is not None:
+            filtered_entries = filtered_entries[:top_n]
+        return _fmt(
+            {
+                "success": True,
+                "min_severity": min_severity,
+                "count": len(filtered_entries),
+                "entries": filtered_entries,
+            }
+        )
+
+    lowered_context = context.lower()
+    tokens = _context_tokens(context)
+    scored: list[tuple[int, dict]] = []
+    for entry in filtered_entries:
+        score = _score_gotcha_for_context(entry, lowered_context, tokens)
+        if score > 0:
+            scored.append((score, entry))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    ranked_entries = [entry for _, entry in scored]
+    if top_n is not None:
+        ranked_entries = ranked_entries[:top_n]
+    return _fmt(
+        {
+            "success": True,
+            "context": context,
+            "min_severity": min_severity,
+            "count": len(ranked_entries),
+            "entries": ranked_entries,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool 8: get_quick_reference
 # ---------------------------------------------------------------------------
 
 _QUICK_REFERENCE = """\
@@ -888,7 +1142,24 @@ def get_quick_reference() -> str:
     images, text, styles, geometry, transformations, layers, colors,
     find/change, export, and common gotchas.
     """
-    return _QUICK_REFERENCE
+    entries = _load_gotcha_entries()
+    community_lines = []
+    for entry in entries:
+        severity = str(entry.get("severity", "")).lower()
+        if severity not in {"blocker", "warning"}:
+            continue
+        problem = str(entry.get("problem", "")).strip()
+        solution = str(entry.get("solution", "")).strip()
+        entry_id = str(entry.get("id", "")).strip() or "unknown-id"
+        if not problem or not solution:
+            continue
+        community_lines.append(f"  - [{severity}] {entry_id}: {problem} -> {solution}")
+
+    if not community_lines:
+        return _QUICK_REFERENCE
+
+    dynamic_section = "\n## Community Gotchas (from gotchas.json)\n" + "\n".join(community_lines) + "\n"
+    return _QUICK_REFERENCE + dynamic_section
 
 
 # ---------------------------------------------------------------------------

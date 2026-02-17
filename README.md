@@ -54,6 +54,7 @@ Core files:
 - `manage.py`: CLI to analyze/build/update/validate the database
 - `indesign_com.py`: COM/OLE automation layer + safe JSX wrapper
 - `json_polyfill.jsx`: ExtendScript JSON polyfill + `__safeStringify()` (DOM-safe)
+- `gotchas.json`: curated gotchas and best-practice knowledge base (community growth via PRs)
 
 ## MCP Tools Reference
 
@@ -78,6 +79,9 @@ Core files:
 - `get_selection(detail_level="basic"|"full")`
 - `eval_expression(expression)`
 - `undo(steps=1)`
+- `report_learning(problem, solution, triggers, category?, severity?, error_message?, jsx_context?)`
+- `get_gotchas(context?)`
+- `get_quick_reference()`
 
 ## Agentic Usage / Key Patterns
 
@@ -235,6 +239,38 @@ To rebuild all three sources:
 ```bash
 python manage.py build-all --dom "C:\\path\\to\\omv$indesign-22.064$22.0.xml" --js "C:\\path\\to\\javascript.xml" --sui "C:\\path\\to\\scriptui.xml"
 ```
+
+## Contributing Gotchas
+
+The gotchas system is a shared debugging memory for this MCP:
+
+- `gotchas.json` is the curated, versioned knowledge base committed to Git.
+- Entries describe recurring pitfalls, fixes, and trigger keywords for context matching.
+- Agents will query relevant items with `get_gotchas(context, min_severity?, top_n?)` before writing JSX.
+- `get_quick_reference()` includes static guidance and appends community gotchas at runtime.
+- During troubleshooting, agents can and will submit newly resolved issues via `report_learning(...)` to your MCP.
+
+Please commit them as PR to this repo for all to benefit! It keeps successful debugging outcomes reusable across future sessions and across users.
+
+Two contribution paths are supported:
+
+### A) Direct curated updates via GitHub PR
+1. Fork + clone this repository
+2. Edit `gotchas.json` and add a new entry
+3. Open a PR with the new gotcha
+4. Maintainer review and merge
+
+### B) Agent submission -> maintainer review
+1. Your agent calls `report_learning(...)`
+2. Entry is written to `submissions/pending.jsonl` (local queue, not committed)
+3. Maintainer (you) runs:
+
+```bash
+python manage.py review-submissions
+```
+
+4. Approved entries are promoted to `gotchas.json`
+5. Commit and open a PR to share the curated learning
 
 ## License
 
