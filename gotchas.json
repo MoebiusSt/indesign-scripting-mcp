@@ -5,7 +5,13 @@
       "id": "scriptui-palette-targetengine",
       "category": "scriptui",
       "severity": "blocker",
-      "triggers": ["palette", "modeless", "window", "#targetengine", "scriptui"],
+      "triggers": [
+        "palette",
+        "modeless",
+        "window",
+        "#targetengine",
+        "scriptui"
+      ],
       "problem": "Modeless palette windows can close immediately after script execution.",
       "solution": "Use #targetengine with a persistent session name before creating palette windows.",
       "example_bad": "var w = new Window('palette', 'Title');\nw.show();",
@@ -17,7 +23,13 @@
       "id": "scriptui-event-engine-scope",
       "category": "scriptui",
       "severity": "warning",
-      "triggers": ["afterSelectionChanged", "event listener", "engine", "scope", "scriptui"],
+      "triggers": [
+        "afterSelectionChanged",
+        "event listener",
+        "engine",
+        "scope",
+        "scriptui"
+      ],
       "problem": "Event listeners can run in a different engine context and lose closure state.",
       "solution": "Use shared state on persistent engine objects or prefer IdleTask polling for selection monitoring.",
       "added": "2026-02-17",
@@ -27,7 +39,13 @@
       "id": "move-by-unit-strings",
       "category": "extendscript",
       "severity": "warning",
-      "triggers": ["move", "by", "UnitValue", "offset", "position"],
+      "triggers": [
+        "move",
+        "by",
+        "UnitValue",
+        "offset",
+        "position"
+      ],
       "problem": "The move() by argument can fail when UnitValue objects are passed directly.",
       "solution": "Pass numeric offsets or unit strings (for example '10mm') that match InDesign expectations.",
       "added": "2026-02-17",
@@ -37,7 +55,14 @@
       "id": "geometricbounds-order",
       "category": "dom",
       "severity": "warning",
-      "triggers": ["geometricBounds", "bounds", "top", "left", "bottom", "right"],
+      "triggers": [
+        "geometricBounds",
+        "bounds",
+        "top",
+        "left",
+        "bottom",
+        "right"
+      ],
       "problem": "geometricBounds is often confused with x,y,width,height.",
       "solution": "Always use geometricBounds as [top, left, bottom, right].",
       "added": "2026-02-17",
@@ -47,7 +72,13 @@
       "id": "findchange-clear-preferences",
       "category": "dom",
       "severity": "blocker",
-      "triggers": ["findTextPreferences", "findGrepPreferences", "NothingEnum", "find/change", "grep"],
+      "triggers": [
+        "findTextPreferences",
+        "findGrepPreferences",
+        "NothingEnum",
+        "find/change",
+        "grep"
+      ],
       "problem": "Find/change operations can produce incorrect results when preferences are not reset.",
       "solution": "Reset find and change preferences to NothingEnum.NOTHING before each find/change operation.",
       "added": "2026-02-17",
@@ -57,7 +88,13 @@
       "id": "extendscript-es3-only",
       "category": "extendscript",
       "severity": "warning",
-      "triggers": ["let", "const", "arrow function", "template literal", "es3"],
+      "triggers": [
+        "let",
+        "const",
+        "arrow function",
+        "template literal",
+        "es3"
+      ],
       "problem": "ExtendScript does not support modern JavaScript syntax.",
       "solution": "Use ES3-compatible syntax (var, classic functions, string concatenation).",
       "added": "2026-02-17",
@@ -67,7 +104,13 @@
       "id": "file-path-constructor",
       "category": "extendscript",
       "severity": "tip",
-      "triggers": ["File(", "path", "exportFile", "link", "filesystem"],
+      "triggers": [
+        "File(",
+        "path",
+        "exportFile",
+        "link",
+        "filesystem"
+      ],
       "problem": "File path handling can fail with raw path assumptions.",
       "solution": "Construct file references explicitly with File('/path/file') or File('~/Desktop/file').",
       "added": "2026-02-17",
@@ -77,7 +120,12 @@
       "id": "collection-length-before-index",
       "category": "dom",
       "severity": "warning",
-      "triggers": ["collection", "length", "index", "out of range"],
+      "triggers": [
+        "collection",
+        "length",
+        "index",
+        "out of range"
+      ],
       "problem": "Direct indexing into empty collections causes runtime errors.",
       "solution": "Check collection.length before reading collection[index].",
       "added": "2026-02-17",
@@ -87,7 +135,12 @@
       "id": "parentpage-null-pasteboard",
       "category": "dom",
       "severity": "warning",
-      "triggers": ["parentPage", "pasteboard", "null", "page item"],
+      "triggers": [
+        "parentPage",
+        "pasteboard",
+        "null",
+        "page item"
+      ],
       "problem": "parentPage is null for items on the pasteboard.",
       "solution": "Wrap parentPage access in try/catch or explicit null checks.",
       "added": "2026-02-17",
@@ -97,7 +150,12 @@
       "id": "runjsx-result-convention",
       "category": "execution",
       "severity": "warning",
-      "triggers": ["run_jsx", "__result", "return", "serialization"],
+      "triggers": [
+        "run_jsx",
+        "__result",
+        "return",
+        "serialization"
+      ],
       "problem": "Using return instead of __result yields missing or unexpected outputs.",
       "solution": "Assign output values to __result and avoid return statements in run_jsx payloads.",
       "added": "2026-02-17",
@@ -107,11 +165,272 @@
       "id": "prefer-everyitem-bulk-ops",
       "category": "execution",
       "severity": "tip",
-      "triggers": ["everyItem", "loop", "bulk", "performance", "collection"],
+      "triggers": [
+        "everyItem",
+        "loop",
+        "bulk",
+        "performance",
+        "collection"
+      ],
       "problem": "Manual loops create unnecessary bridge round-trips for uniform operations.",
       "solution": "Use collection APIs (everyItem, itemByName, itemByID, itemByRange) whenever possible.",
       "added": "2026-02-17",
       "source": "community"
+    },
+    {
+      "id": "app-selection-cannot-contain-objects-from-multiple-spreads-setti",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "selection",
+        "select",
+        "multiple spreads",
+        "cross-spread",
+        "app.selection"
+      ],
+      "problem": "app.selection cannot contain objects from multiple spreads. Setting app.selection with items across spreads causes errors or unexpected behavior.",
+      "solution": "When selecting multiple objects programmatically, filter to items on the active spread only. Use item.parentPage or item.parent to determine spread membership, or navigate to each spread individually.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "spread-allpageitems-throws-error-fehlerzeichenfolge-allpageitems",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "allPageItems",
+        "spread",
+        "corrupted",
+        "nulled",
+        "NaN",
+        "enumerate"
+      ],
+      "problem": "spread.allPageItems throws error \"Fehlerzeichenfolge: allPageItems\" when spread contains deeply corrupted objects (e.g. NaN transforms from nulled/collapsed page items).",
+      "solution": "Wrap spread.allPageItems in try/catch. On failure, fall back to spread.pageItems (top-level only) and recursively collect children via item.pageItems.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "try { items = spread.allPageItems; } catch(e) { items = []; var top = spread.pageItems; for (var i=0; i&lt;top.length; i++) { items.push(top[i]); /* recurse children */ } }"
+    },
+    {
+      "id": "flexobject-children-and-copies-derived-from-flexobjects-may-not-",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "FlexObject",
+        "flex container",
+        "preview mode",
+        "invisible",
+        "disappear",
+        "spread registration",
+        "allPageItems",
+        "IDML roundtrip",
+        "nonprinting"
+      ],
+      "problem": "FlexObject children and copies derived from FlexObjects may not register in spread.allPageItems after IDML roundtrip, causing them to disappear in Preview mode while remaining visible in Normal and Overprint Preview.",
+      "solution": "Workaround: Cut affected top-level item, paste into a temp rectangle, cut it back out, paste back, restore bounds. This forces re-registration in the spread hierarchy. Alternatively export/reimport IDML.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// Detection: items in page.allPageItems but not in spread.allPageItems\nvar spreadIds = {};\nfor (var i = 0; i < spread.allPageItems.length; i++) spreadIds[spread.allPageItems[i].id] = true;\nfor (var j = 0; j < page.allPageItems.length; j++) {\n    var item = page.allPageItems[j];\n    if (item.parent.constructor.name === \"Spread\" && !spreadIds[item.id]) {\n        // item is affected - not registered in spread\n    }\n}"
+    },
+    {
+      "id": "app-rtfimportpreferences-and-app-importpreferences-do-not-exist-",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "rtf import",
+        "wordRTFImportPreferences",
+        "import preferences",
+        "rtf settings"
+      ],
+      "problem": "app.rtfImportPreferences and app.importPreferences do not exist in ExtendScript DOM",
+      "solution": "Use app.wordRTFImportPreferences (WordRTFImportPreference object) for RTF import settings. Key properties: removeFormatting, preserveLocalOverrides, importUnusedStyles, resolveCharacterStyleClash, resolveParagraphStyleClash, useTypographersQuotes, importFootnotes, importEndnotes, convertPageBreaks.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "named-import-presets-from-the-indesign-ui-dialog-e-g-rtf-format-",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "named preset",
+        "import preset",
+        "preset name",
+        "RTF preset",
+        "Importvorgabe"
+      ],
+      "problem": "Named import presets from the InDesign UI dialog (e.g. \"RTF-Format-löschen-m-Abweich\") are not accessible as named objects in the ExtendScript DOM",
+      "solution": "Named presets are UI-only. They simply set properties on the underlying preference object. Access the preference directly via app.wordRTFImportPreferences, or iterate app.preferences (105 entries) to find it — WordRTFImportPreference is typically at index 18. Read/set properties directly in script instead of referencing preset names.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "import-preference-objects-for-common-file-formats-are-scattered-",
+      "category": "dom",
+      "severity": "tip",
+      "triggers": [
+        "import preferences",
+        "file format",
+        "txt codepage",
+        "pdf place",
+        "eps import",
+        "ai import",
+        "tiff transparency",
+        "png alpha",
+        "characterSet",
+        "pdfCrop",
+        "importedPageCrop"
+      ],
+      "problem": "Import preference objects for common file formats are scattered across different app properties, not unified under one namespace",
+      "solution": "Use the correct preference object per format: .rtf/.doc → app.wordRTFImportPreferences (removeFormatting, preserveLocalOverrides, resolveCharacterStyleClash, resolveParagraphStyleClash); .txt → app.textImportPreferences (characterSet, platform — critical for correct codepage/encoding); .pdf (place) → app.pdfPlacePreferences (pdfCrop, transparentBackground); .ai/.pdf (page) → app.importedPageAttributes (importedPageCrop); .eps → app.epsImportPreferences (epsProxy, opiComments). TIFF/JPEG/PNG have no dedicated import preference objects — alpha/transparency is handled automatically or via frame properties after placing.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "doc-paragraphstyles-itembyname-fails-or-returns-nothing-for-styl",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "paragraph style",
+        "itemByName",
+        "style group",
+        "allParagraphStyles",
+        "character style",
+        "allCharacterStyles"
+      ],
+      "problem": "doc.paragraphStyles.itemByName() fails or returns nothing for styles organized in groups; doc.paragraphStyles only contains ungrouped top-level styles",
+      "solution": "Use doc.allParagraphStyles (or doc.allCharacterStyles) to get all styles including those in groups. These return an array without itemByName() — must search with a for-loop: for (var i=0; i &lt; doc.allParagraphStyles.length; i++) { if (doc.allParagraphStyles[i].name === name) return doc.allParagraphStyles[i]; }",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// WRONG: doc.paragraphStyles.itemByName(\"My Grouped Style\") → may return nothing\\n// CORRECT:\\nfunction getStyle(name) {\\n    var all = doc.allParagraphStyles;\\n    for (var i = 0; i < all.length; i++) {\\n        if (all[i].name === name) return all[i];\\n    }\\n    return null;\\n}"
+    },
+    {
+      "id": "inserting-text-at-the-end-of-a-paragraph-via-insertionpoints-req",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "insertion point",
+        "paragraph end",
+        "soft return",
+        "forced line break",
+        "append text",
+        "insertionPoints"
+      ],
+      "problem": "Inserting text at the end of a paragraph via insertionPoints requires knowing that characters[length-1] is the trailing \\\\r — inserting after it creates a new paragraph instead",
+      "solution": "Use insertionPoints[characters.length - 1] to place the cursor just before the trailing \\\\r. Insert \\\\n (charCode 10) for a forced/soft line break that stays within the same paragraph. Using \\\\r would create a new paragraph. After insertion, refresh story.paragraphs as the collection is live.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// Insert text at end of paragraph, BEFORE trailing \\\\r:\\nvar charCount = para.characters.length;\\nvar insertIP = para.insertionPoints[charCount - 1]; // just before \\\\r\\ninsertIP.contents = \\\"\\\\n\\\" + authorName; // \\\\n = forced line break, stays in same paragraph"
+    },
+    {
+      "id": "story-paragraphs-is-a-live-collection-indices-shift-immediately-",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "story.paragraphs",
+        "live collection",
+        "index shift",
+        "paragraph delete",
+        "text manipulation",
+        "bottom-up"
+      ],
+      "problem": "story.paragraphs is a live collection — indices shift immediately after any insert or delete, causing off-by-one errors if the collection is cached",
+      "solution": "Re-fetch story.paragraphs after every insert or delete operation. For multiple deletions always process bottom-up (highest index first) to avoid index shifts affecting remaining targets. Separate the verification pass (read-only) from the mutation pass (destructive) rather than combining them.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// After any insert/delete, re-fetch the paragraphs collection:\\nparas = story.paragraphs; // live collection, indices shift after mutations\\n// Always process deletions bottom-up to avoid index shifts:\\nfor (var m = toDelete.length - 1; m >= 0; m--) {\\n    story.paragraphs[toDelete[m]].remove();\\n    paras = story.paragraphs; // refresh\\n}"
+    },
+    {
+      "id": "trying-to-calculate-image-placement-scale-manually-via-graphic-h",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "image placement",
+        "fit proportionally",
+        "FitOptions",
+        "image scale",
+        "graphic scale",
+        "horizontalScale",
+        "place image",
+        "resize frame"
+      ],
+      "problem": "Trying to calculate image placement scale manually via graphic.horizontalScale/verticalScale is unreliable — values depend on current frame size and prior fit operations, leading to wrong dimensions",
+      "solution": "Use frame.fit(FitOptions.PROPORTIONALLY) first to normalize the image into the frame, then read graphic.geometricBounds to get actual image dimensions in frame coordinates, calculate the scale factor from those, resize the frame to target dimensions, and finish with frame.fit(FitOptions.CONTENT_TO_FRAME). This is more reliable than working with horizontalScale/verticalScale directly.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// Reliable approach: place image, then fit proportionally, then resize frame to image\\nframe.place(imgFile);\\nframe.fit(FitOptions.PROPORTIONALLY); // fits image inside frame without distortion\\n// Then read actual image bounds and resize frame to match:\\nvar g = frame.graphics[0];\\nvar imgW = g.geometricBounds[3] - g.geometricBounds[1];\\nvar imgH = g.geometricBounds[2] - g.geometricBounds[0];\\nvar scale = targetWidthMM / imgW;\\nframe.geometricBounds = [top, left, top + imgH * scale, left + targetWidthMM];\\nframe.fit(FitOptions.CONTENT_TO_FRAME);"
+    },
+    {
+      "id": "textwrapmodes-enum-values-are-not-obvious-from-the-name-alone-nu",
+      "category": "dom",
+      "severity": "tip",
+      "triggers": [
+        "text wrap",
+        "textWrapMode",
+        "TextWrapModes",
+        "BOUNDING_BOX_TEXT_WRAP",
+        "textWrapOffset",
+        "text runaround"
+      ],
+      "problem": "TextWrapModes enum values are not obvious from the name alone — numeric fallback needed when enum name doesn't resolve in older ExtendScript contexts",
+      "solution": "TextWrapModes.BOUNDING_BOX_TEXT_WRAP = 1651729523; TextWrapModes.NONE = 1852796517. textWrapOffset takes [top, right, bottom, left] order (like CSS). Always set textWrapMode before textWrapOffset.",
+      "added": "2026-02-22",
+      "source": "auto-submission",
+      "example_bad": "// Text wrap around bounding box:\\nframe.textWrapPreferences.textWrapMode = TextWrapModes.BOUNDING_BOX_TEXT_WRAP;\\n// Numeric value: 1651729523\\n// Offset order: [top, right, bottom, left]\\nframe.textWrapPreferences.textWrapOffset = [0, 0, 3, 0]; // 3mm bottom offset"
+    },
+    {
+      "id": "rtf-files-with-windows-1252-encoding-ansicpg1252-can-produce-gar",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "RTF encoding",
+        "Win-1252",
+        "ansicpg1252",
+        "garbled characters",
+        "Umlaute",
+        "placeholder glyph",
+        "codepage",
+        "RTF import encoding"
+      ],
+      "problem": "RTF files with Windows-1252 encoding (ansicpg1252) can produce garbled characters (placeholder glyphs) when imported into InDesign, even though the RTF header declares the correct codepage",
+      "solution": "The root cause is usually the system locale or InDesign's RTF parser misinterpreting \\'xx hex sequences. Fix via app.wordRTFImportPreferences: ensure the correct settings are applied before placing. If garbling persists despite correct settings, the issue may be in Word's RTF writer (some versions embed characters as \\\\u sequences instead of \\'xx) or a mismatch between the RTF codepage and the actual byte values. Verify by reading the raw RTF bytes in PowerShell with [System.Text.Encoding]::GetEncoding(1252) and checking that \\'e4 → ä, \\'f6 → ö, \\'fc → ü etc. The symptom of partial garbling (some words lose letters like \"Philharmoniker\" → \"rmo\") points to InDesign treating multi-byte sequences from a wrong font charset declaration in the RTF fonttbl.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "scripting-operations-planned-from-stale-assumptions-e-g-paragrap",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "verify state",
+        "document state",
+        "stale assumptions",
+        "active document",
+        "verification pass",
+        "read-only check",
+        "before scripting"
+      ],
+      "problem": "Scripting operations planned from stale assumptions (e.g. paragraph indices, existing objects, style names from a previous session) can fail silently or corrupt the document if the state has changed due to undo/redo or prior operations",
+      "solution": "Always run a read-only JSX verification pass first to confirm current document state before executing any destructive or structural operations. Check: correct document is active (app.activeDocument.name), expected frames exist and have correct column count, paragraph styles are present (doc.allParagraphStyles), existing images are as expected (page.allPageItems with link names). Never carry over index assumptions from previous sessions.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
+    },
+    {
+      "id": "combining-read-verify-logic-and-destructive-mutations-in-a-singl",
+      "category": "execution",
+      "severity": "tip",
+      "triggers": [
+        "separate passes",
+        "verification before mutation",
+        "undo_mode",
+        "destructive operation",
+        "partial failure",
+        "JSX structure",
+        "operation planning"
+      ],
+      "problem": "Combining read/verify logic and destructive mutations in a single JSX block makes it hard to detect partial failures and recover — if the destructive part fails mid-way the document can be in an inconsistent state",
+      "solution": "Split complex text or layout operations into separate JSX calls: (1) read-only verification pass that returns a log of what will be done, (2) the actual mutation pass. Review the plan output between steps when stakes are high. Use undo_mode='entire' on the mutation pass so a single undo reverts everything cleanly. For very complex operations, further split into logical sub-steps each with their own undo label.",
+      "added": "2026-02-22",
+      "source": "auto-submission"
     }
   ]
 }
