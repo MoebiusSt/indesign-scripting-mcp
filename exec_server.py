@@ -164,9 +164,13 @@ Do NOT use `return` — the wrapper handles that.
 - **SHOULD** call `get_quick_reference()` once when the first InDesign task starts in a conversation.
 - **MUST** call `report_learning(...)` after a user-reported bug/gotcha was resolved and root cause + fix are known.
 - **SHOULD** avoid duplicate reports when an equivalent gotcha already exists.
+- **MUST** classify labels by lifecycle: `_tmp_` for temporary intra-task state, `agentContext_` for intentional cross-session facts.
+- **MUST** clear temporary labels at task end with `insertLabel(key, "")`.
+- **SHOULD** maintain `_agentLabelRegistry` listing active persistent keys for document auditability.
 
 Maintainer promotion command:
 `python manage.py review-submissions`
+This reviews entries in `submissions/pending.jsonl` and promotes accepted ones into `gotchas.json`.
 
 ## Common Patterns
 
@@ -201,6 +205,27 @@ Maintainer promotion command:
     tf.geometricBounds = [20, 20, 100, 180]; // [top, left, bottom, right] in document units
     tf.contents = "Hello from the Agent";
     __result = {id: tf.id, bounds: tf.geometricBounds};
+
+### Label state lifecycle (multi-call workflows)
+    var doc = app.activeDocument;
+
+    // Temporary handoff state, must be cleared at end of task
+    doc.insertLabel("_tmp_processedIds", "12,42,73");
+    var tmp = doc.extractLabel("_tmp_processedIds");
+    var ids = tmp ? tmp.split(",") : [];
+    doc.insertLabel("_tmp_processedIds", ""); // cleanup required
+
+    // Persistent context state, keep only if future tasks need it
+    doc.insertLabel("agentContext_layoutMap", JSON.stringify({sectionA: [1, 2, 3]}));
+    var raw = doc.extractLabel("agentContext_layoutMap");
+    var map = raw ? eval("(" + raw + ")") : null;
+
+    // Optional registry for persistent keys
+    var regKey = "_agentLabelRegistry";
+    var regRaw = doc.extractLabel(regKey);
+    var keys = regRaw ? regRaw.split(",") : [];
+    if (keys.indexOf("agentContext_layoutMap") < 0) keys.push("agentContext_layoutMap");
+    doc.insertLabel(regKey, keys.join(","));
 
 ## Collection Patterns (PREFER over loops)
 
@@ -1074,6 +1099,50 @@ _QUICK_REFERENCE = """\
   app.findChangeGrepOptions.includeLockedLayersForFind = false;
   app.findChangeGrepOptions.includeLockedStoriesForFind = false;
   app.findChangeGrepOptions.includeMasterPages = false;
+
+## Label State & Lifecycle
+  doc.insertLabel("key", "value")              Persist string value in document
+  doc.extractLabel("key")                      Read value (returns "" when missing)
+  pageItem.insertLabel("key", "value")         Persist value on individual object
+  pageItem.extractLabel("key")                 Read value from object
+  doc.insertLabel("key", "")                   Delete/clear a label key
+  // Temporary keys: _tmp_*  -> must be cleaned up at task end
+  // Persistent keys: agentContext_* -> only if useful across future tasks
+  // Optional: _agentLabelRegistry = comma-separated persistent keys
+  // Avoid persisting toSource() index-path references across structural edits
+
+## Reusable Utility Patterns (Agent-safe)
+  // Pattern from legacy util scripts: always reset find/change prefs before AND after use.
+  function safeFindGrep(target, findProps, changeProps, optionProps) {
+    app.findGrepPreferences = NothingEnum.NOTHING;
+    app.changeGrepPreferences = NothingEnum.NOTHING;
+    app.findGrepPreferences.properties = findProps || {};
+    if (changeProps) app.changeGrepPreferences.properties = changeProps;
+    if (optionProps) app.findChangeGrepOptions.properties = optionProps;
+    var out = changeProps ? target.changeGrep() : target.findGrep();
+    app.findGrepPreferences = NothingEnum.NOTHING;
+    app.changeGrepPreferences = NothingEnum.NOTHING;
+    return out;
+  }
+
+  // Pattern from legacy util scripts: style lookup across nested groups.
+  function getParagraphStylesByNameDeep(doc, styleName) {
+    var found = [];
+    function walk(parent) {
+      var i;
+      for (i = 0; i < parent.paragraphStyles.length; i++) {
+        if (parent.paragraphStyles[i].name === styleName) found.push(parent.paragraphStyles[i]);
+      }
+      for (i = 0; i < parent.paragraphStyleGroups.length; i++) {
+        walk(parent.paragraphStyleGroups[i]);
+      }
+    }
+    walk(doc);
+    return found;
+  }
+
+  // Do not port UI/session-bound helpers into MCP agents: alert(), exit(), activeScript path helpers.
+  // Do not reuse known-problematic helpers without fixes: incomplete glyph wrappers, buggy multiReplace variants.
 
 ## Export
   // PDF with preset:
