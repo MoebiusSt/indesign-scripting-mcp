@@ -431,6 +431,26 @@
       "solution": "Split complex text or layout operations into separate JSX calls: (1) read-only verification pass that returns a log of what will be done, (2) the actual mutation pass. Review the plan output between steps when stakes are high. Use undo_mode='entire' on the mutation pass so a single undo reverts everything cleanly. For very complex operations, further split into logical sub-steps each with their own undo label.",
       "added": "2026-02-22",
       "source": "auto-submission"
+    },
+    {
+      "id": "temporary-scriptlabels-created-during-multi-step-mcp-workflows-a",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "insertLabel",
+        "extractLabel",
+        "script labels",
+        "_tmp_",
+        "agentContext_",
+        "label cleanup",
+        "label pollution",
+        "label namespace"
+      ],
+      "problem": "Temporary ScriptLabels created during multi-step MCP workflows accumulate in documents and pollute the label namespace, which can mislead later agent runs.",
+      "solution": "Use a strict label lifecycle: `_tmp_` keys are temporary handoff state and must be deleted at task end via `insertLabel(key, \"\")`; `agentContext_` keys are only for stable cross-session facts with proven future value. Optionally track persistent keys in `_agentLabelRegistry` for auditability.",
+      "added": "2026-02-23",
+      "source": "auto-submission",
+      "example_bad": "var tmpKey = \"_tmp_processedIds\";\ndoc.insertLabel(tmpKey, ids.join(\",\"));\n// ... use data across calls ...\ndoc.insertLabel(tmpKey, \"\"); // mandatory cleanup\n\ndoc.insertLabel(\"agentContext_layoutMap\", JSON.stringify(layoutMap));\nvar keys = (doc.extractLabel(\"_agentLabelRegistry\") || \"\").split(\",\");\nif (keys.indexOf(\"agentContext_layoutMap\") < 0) keys.push(\"agentContext_layoutMap\");\ndoc.insertLabel(\"_agentLabelRegistry\", keys.join(\",\"));"
     }
   ]
 }
