@@ -10,9 +10,6 @@
 
 ![Some chats with theInDesign agent](./docs/chat-example.svg)
 
-<br>
-
-
 Two MCP servers for Adobe InDesign:
 
 - **InDesign DOM MCP** (`server.py`): query InDesign DOM + ExtendScript JavaScript Core + ScriptUI classes from a local SQLite database built from XML sources.
