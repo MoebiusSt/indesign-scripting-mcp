@@ -1,0 +1,104 @@
+<svg viewBox="0 0 600 1500" xmlns="http://www.w3.org/2000/svg">
+  <!-- Define styles -->
+  <defs>
+    <style>
+      .user-bubble { fill: #f0f0f0; }
+      .bot-bubble { fill: #e0e0e0; }
+      .text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; fill: #333; }
+      .text-tspan { dominant-baseline: hanging; }
+    </style>
+  </defs>
+
+  <!-- Message 1: User (right) -->
+  <g>
+    <rect class="user-bubble" x="140" y="20" width="420" height="155" rx="18" ry="18"/>
+    <text class="text" x="160" y="35">
+      <tspan class="text-tspan" x="160">The attached PDF is an earlier export of</tspan>
+      <tspan class="text-tspan" x="160" dy="18">the active document in InDesign. The PDF</tspan>
+      <tspan class="text-tspan" x="160" dy="18">contains 23 comments with notes on</tspan>
+      <tspan class="text-tspan" x="160" dy="18">corrections in the document. Use your</tspan>
+      <tspan class="text-tspan" x="160" dy="18">indesign-dom mcp and indesign-exec mcp,</tspan>
+      <tspan class="text-tspan" x="160" dy="18">and try to make the corrections on the</tspan>
+      <tspan class="text-tspan" x="160" dy="18">pages.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 2: Bot (left) -->
+  <g>
+    <rect class="bot-bubble" x="40" y="200" width="420" height="90" rx="18" ry="18"/>
+    <text class="text" x="60" y="215">
+      <tspan class="text-tspan" x="60">First, I read the InDesign MCP Operator</tspan>
+      <tspan class="text-tspan" x="60" dy="18">Skill and then look at the PDF comments.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 3: Bot (left) -->
+  <g>
+    <rect class="bot-bubble" x="40" y="315" width="420" height="90" rx="18" ry="18"/>
+    <text class="text" x="60" y="330">
+      <tspan class="text-tspan" x="60">I've extracted 23 comments. Let me check</tspan>
+      <tspan class="text-tspan" x="60" dy="18">the status of the InDesign document and</tspan>
+      <tspan class="text-tspan" x="60" dy="18">then systematically make the corrections.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 4: Bot (left) -->
+  <g>
+    <rect class="bot-bubble" x="40" y="430" width="100" height="55" rx="18" ry="18"/>
+    <text class="text" x="60" y="445">
+      <tspan class="text-tspan" x="60">Done.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 5: User (right) -->
+  <g>
+    <rect class="user-bubble" x="80" y="510" width="480" height="175" rx="18" ry="18"/>
+    <text class="text" x="100" y="525">
+      <tspan class="text-tspan" x="100">Perfect, thanks! Please sort the colours in</tspan>
+      <tspan class="text-tspan" x="100" dy="18">activeDocument (except for the InDesign</tspan>
+      <tspan class="text-tspan" x="100" dy="18">standard swatches) by hue and brightness so</tspan>
+      <tspan class="text-tspan" x="100" dy="18">that they are sorted like 'gradations' in the</tspan>
+      <tspan class="text-tspan" x="100" dy="18">Swatches panel. You'll probably have to</tspan>
+      <tspan class="text-tspan" x="100" dy="18">convert copies of them to LAB and group</tspan>
+      <tspan class="text-tspan" x="100" dy="18">them temporarily along the way. Don't change</tspan>
+      <tspan class="text-tspan" x="100" dy="18">any color!</tspan>
+    </text>
+  </g>
+
+  <!-- Message 6: Bot (left) -->
+  <g>
+    <rect class="bot-bubble" x="40" y="710" width="420" height="90" rx="18" ry="18"/>
+    <text class="text" x="60" y="725">
+      <tspan class="text-tspan" x="60">All 36 custom colours were sorted</tspan>
+      <tspan class="text-tspan" x="60" dy="18">mathematically — without any actual change</tspan>
+      <tspan class="text-tspan" x="60" dy="18">to the colours — according to hue and</tspan>
+      <tspan class="text-tspan" x="60" dy="18">brightness.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 7: User (right) -->
+  <g>
+    <rect class="user-bubble" x="50" y="825" width="490" height="175" rx="18" ry="18"/>
+    <text class="text" x="70" y="840">
+      <tspan class="text-tspan" x="70">Fix anchored index frames with Object</tspan>
+      <tspan class="text-tspan" x="70" dy="18">format 'Image Index Number' in the current</tspan>
+      <tspan class="text-tspan" x="70" dy="18">document. It uses 'Fit to Content' + auto-</tspan>
+      <tspan class="text-tspan" x="70" dy="18">positioning, but frames are vertically</tspan>
+      <tspan class="text-tspan" x="70" dy="18">misplaced due to timing issues (variable text</tspan>
+      <tspan class="text-tspan" x="70" dy="18">insert, content fit, anchor position apply).</tspan>
+      <tspan class="text-tspan" x="70" dy="18">Reapply fit and anchor position on all</tspan>
+      <tspan class="text-tspan" x="70" dy="18">affected frames as if manually nudging them</tspan>
+      <tspan class="text-tspan" x="70" dy="18">with the mouse.</tspan>
+    </text>
+  </g>
+
+  <!-- Message 8: Bot (left) -->
+  <g>
+    <rect class="bot-bubble" x="40" y="1025" width="420" height="90" rx="18" ry="18"/>
+    <text class="text" x="60" y="1040">
+      <tspan class="text-tspan" x="60">73 frames repaired, no errors. Please check</tspan>
+      <tspan class="text-tspan" x="60" dy="18">the document to see if the positions are</tspan>
+      <tspan class="text-tspan" x="60" dy="18">now correct.</tspan>
+    </text>
+  </g>
+</svg>

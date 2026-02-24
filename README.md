@@ -8,6 +8,11 @@
 
 <br>
 
+![Some chats with theInDesign agent](./docs/chat-example.svg)
+
+<br>
+
+
 Two MCP servers for Adobe InDesign:
 
 - **InDesign DOM MCP** (`server.py`): query InDesign DOM + ExtendScript JavaScript Core + ScriptUI classes from a local SQLite database built from XML sources.
@@ -226,7 +231,18 @@ Add two servers that run from this repo directory (use stdio transport):
 
 Add the same server definitions to `claude_desktop_config.json` (the exact file location depends on your OS install).
 
-## Updating the Database
+## Optional: Claude Skill (InDesign MCP Operator)
+
+To improve the AI's ability to use `indesign-dom` and `indesign-exec` tools. effectively, we provide a **Claude Skill** that teaches it a robust "inspect-lookup-execute-verify" workflow. This helps prevent common scripting errors and ensures safer execution. The agent will use the MCPs just fine without it, but it smoothes things.
+
+The skill files are located in `claude-skills/indesign-mcp-operator/`:
+
+- `indesign-mcp-operator.skill`: The skill definition file for direct installtion.
+- `SKILL.md`: The markdown source of the skill instructions.
+- `reference.md`: Reusable patterns and prompt templates.
+
+
+## Updating the Database with newer DOM
 
 To update one source:
 
