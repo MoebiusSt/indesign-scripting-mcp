@@ -53,6 +53,45 @@ doc.insertLabel("_tmp_batchIds", "");
 __result = {processed: ids.length, cleaned: doc.extractLabel("_tmp_batchIds") === ""};
 ```
 
+## Short UXP Patterns (`language="uxp"`)
+
+### Modern Data Transformation & Layout
+```javascript
+const { app } = require('indesign');
+const doc = app.activeDocument;
+
+// ES6+ map, filter, Set, destructuring
+const stories = doc.stories.everyItem().getElements();
+const paragraphs = stories
+  .flatMap(s => s.paragraphs.everyItem().getElements())
+  .map(p => p.contents.trim())
+  .filter(t => t.length > 0);
+
+const uniqueHeadings = Array.from(new Set(paragraphs.filter(t => t.startsWith('#'))));
+
+__result = {
+  totalNonEmptyParagraphs: paragraphs.length,
+  uniqueHeadings: uniqueHeadings
+};
+```
+
+### Async Promise Processing (UXP)
+```javascript
+const { app } = require('indesign');
+const doc = app.activeDocument;
+
+// Top-level await and Promise.all are supported natively
+const [fontNames, swatchNames] = await Promise.all([
+  Promise.resolve(app.fonts.everyItem().name.slice(0, 10)),
+  Promise.resolve(doc.swatches.everyItem().name)
+]);
+
+__result = {
+  sampleFonts: fontNames,
+  swatchesCount: swatchNames.length
+};
+```
+
 ## Recommended Output Checklist
 At the end of each non-trivial task, report:
 

@@ -96,10 +96,17 @@ For ExtendScript-specific features, prefer `source="javascript"`:
 
 `indesign-exec` MCP:
 
-- Execution: `run_jsx(code, undo_name?, undo_mode?)`
+- Execution: `run_jsx(code, undo_name?, undo_mode?, language?)` — supports `language="javascript"` (ExtendScript ES3, default) and `language="uxp"` (modern JS ES6+/V8).
 - Read-only checks: `get_document_info()`, `get_selection(detail_level?)`, `eval_expression(expression)`
 - Recovery: `undo(steps?)`
 - Learning loop: `report_learning(...)`, `get_gotchas(context?)`, `get_quick_reference()`
+
+## Language Selection Policy (ExtendScript vs UXP)
+
+- **Default: ExtendScript (`language="javascript"`)**: Use for 95% of tasks (layout mutations, typography, styles, find/change, table operations, File/Folder IO). Model world-knowledge is significantly richer and more reliable.
+- **Selective: UXP (`language="uxp"`)**: Use when modern JavaScript features (Array `map`/`filter`/`reduce`, `Set`, `Map`, destructuring, top-level `await`, native JSON) simplify data preparation before layout.
+- In UXP: Always import DOM via `const { app, ...enums } = require('indesign');` and assign return data to `__result`.
+- Do NOT use `fetch()` inside InDesign UXP scripts (standalone COM scripts do not pump background socket loops; fetch HTTP data in Python/MCP instead).
 
 ## Community Gotchas Workflow
 

@@ -29,6 +29,8 @@ from typing import Any
 
 import pywintypes
 import win32com.client
+import win32con
+import win32gui
 
 log = logging.getLogger("indesign_com")
 
@@ -37,12 +39,15 @@ log = logging.getLogger("indesign_com")
 # ---------------------------------------------------------------------------
 
 SCRIPT_LANGUAGE_JAVASCRIPT = 1246973031
+SCRIPT_LANGUAGE_UXPSCRIPT = 1431522407
 
 # UndoModes enum values (from InDesign DOM / OMV XML)
 UNDO_ENTIRE_SCRIPT = 1699963733      # UndoModes.ENTIRE_SCRIPT
 UNDO_SCRIPT_REQUEST = 1699967573     # UndoModes.SCRIPT_REQUEST
 UNDO_AUTO = 1699963221               # UndoModes.AUTO_UNDO
 UNDO_FAST_ENTIRE = 1699964501        # UndoModes.FAST_ENTIRE_SCRIPT
+
+_UXP_LABEL_KEY = "__mcp_uxp_result__"
 
 # ProgIDs to try, newest first
 PROGIDS = [
@@ -122,6 +127,53 @@ def _build_wrapper(user_code: str) -> str:
         "    line: typeof e.line === 'number' ? e.line : -1\n"
         "});\n"
         "}\n"
+        "})();\n"
+    )
+
+
+def _build_uxp_wrapper(user_code: str) -> str:
+    """Build the full UXP wrapper around user code.
+
+    Architecture for UXP Scripting (ES6+ / V8 engine):
+    - User code runs in an async IIFE: ``(async () => { ... })()``
+    - Top-level ``await`` inside user code is natively supported
+    - User can import ``const { app } = require('indesign')`` or use global ``app``
+    - User assigns return data to ``__result``
+    - try/catch intercepts all runtime errors to prevent InDesign modal error dialogs
+    - Output is safely written to ``app.insertLabel('__mcp_uxp_result__', ...)``
+      because COM DoScript does not return the last expression value for UXP scripts
+    - Python polls the label via COM and clears it
+    """
+    return (
+        "(async () => {\n"
+        "let __result;\n"
+        "let __error = null;\n"
+        "try {\n"
+        + user_code + "\n"
+        "} catch(e) {\n"
+        "    __error = {\n"
+        "        message: e.message || String(e),\n"
+        "        name: e.name || 'Error',\n"
+        "        stack: e.stack || '',\n"
+        "        line: typeof e.line === 'number' ? e.line : -1\n"
+        "    };\n"
+        "}\n"
+        "try {\n"
+        "    let indApp = (typeof app !== 'undefined' && app) ? app : (typeof require !== 'undefined' ? require('indesign').app : null);\n"
+        "    if (indApp) {\n"
+        "        const payload = JSON.stringify(__error ? {\n"
+        "            success: false,\n"
+        "            error: __error.message,\n"
+        "            name: __error.name,\n"
+        "            stack: __error.stack,\n"
+        "            line: __error.line\n"
+        "        } : {\n"
+        "            success: true,\n"
+        "            result: typeof __result !== 'undefined' ? __result : null\n"
+        "        });\n"
+        f"        indApp.insertLabel('{_UXP_LABEL_KEY}', payload);\n"
+        "    }\n"
+        "} catch(reportErr) {}\n"
         "})();\n"
     )
 
@@ -213,7 +265,7 @@ def is_connected() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# JSX Execution (public API)
+# JSX / UXP Execution (public API)
 # ---------------------------------------------------------------------------
 
 def run_jsx(
@@ -221,32 +273,38 @@ def run_jsx(
     undo_name: str = "Agent Script",
     undo_mode: str = "entire",
     timeout: int | None = None,
+    language: str = "javascript",
 ) -> dict:
-    """Execute JSX code in InDesign with safety wrapping.
+    """Execute JSX (ExtendScript) or UXP code in InDesign with safety wrapping.
 
     Args:
-        code: The JSX code to execute.  Assign to ``__result`` to return data.
+        code: The JavaScript code to execute. Assign to ``__result`` to return data.
         undo_name: Label for the undo step (shown in Edit > Undo).
         undo_mode: ``"entire"`` groups all changes as one undo step (default),
                    ``"auto"`` lets InDesign handle undo per-operation,
                    ``"none"`` skips undo tracking (for read-only operations).
         timeout: Currently unused (reserved for future threading-based timeout).
+        language: ``"javascript"`` (default, ExtendScript ES3) or ``"uxp"`` (modern ES6+ / V8).
 
     Returns:
-        dict with ``success`` key.  On success: ``{success: True, result: ...}``.
+        dict with ``success`` key. On success: ``{success: True, result: ...}``.
         On error: ``{success: False, error: str, name: str, line: int}``.
     """
     app = connect()
 
-    # Build the safe JSX wrapper (IIFE, no eval)
+    lang_lower = language.lower().strip()
+    if lang_lower in ("uxp", "uxpscript"):
+        wrapped = _build_uxp_wrapper(code)
+        if undo_mode == "entire":
+            return _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
+        elif undo_mode == "auto":
+            return _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_SCRIPT_REQUEST)
+        else:
+            return _execute_uxp(app, wrapped)
+
+    # Default: ExtendScript (ES3)
     wrapped = _build_wrapper(code)
 
-    # Map undo_mode to DoScript parameters:
-    #   "entire" → ENTIRE_SCRIPT  (one undo step for everything, labelled)
-    #   "auto"   → SCRIPT_REQUEST (InDesign creates one undo step per DOM change)
-    #   "none"   → plain DoScript without undo params (default SCRIPT_REQUEST
-    #              behaviour, but no extra undo grouping — safe for read-only
-    #              queries and for the undo tool itself)
     if undo_mode == "entire":
         return _execute_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
     elif undo_mode == "auto":
@@ -259,7 +317,7 @@ def run_jsx(
 def eval_expr(expression: str, timeout: int | None = None) -> str:
     """Evaluate a simple expression in InDesign.
 
-    Returns the result as a string.  No undo wrapping.
+    Returns the result as a string. No undo wrapping.
     For quick read-only queries (e.g. ``app.activeDocument.pages.length``).
     """
     app = connect()
@@ -285,7 +343,7 @@ def _execute_with_undo(app, jsx_code: str, undo_name: str,
     positional COM arguments — no string-in-string wrapping needed.
 
     Note on timeout: COM DoScript blocks the calling thread until the
-    ExtendScript engine finishes.  There is no safe way to abort a
+    ExtendScript engine finishes. There is no safe way to abort a
     running script from Python — the only option would be to kill the
     InDesign process, which is unacceptable for production documents.
     Instead we measure wall-clock time and emit a warning when execution
@@ -305,8 +363,146 @@ def _execute_with_undo(app, jsx_code: str, undo_name: str,
             log.warning("DoScript took %.1fs (timeout hint: %ds)", elapsed, DEFAULT_TIMEOUT)
         parsed = _parse_result(result)
         parsed["_elapsed_s"] = round(elapsed, 2)
+        parsed["_engine"] = "extendscript"
         return parsed
     except pywintypes.com_error as e:
+        return _com_error_to_dict(e)
+
+
+def _dismiss_indesign_modal_dialogs() -> bool:
+    """Check for and dismiss any modal error/alert dialogs belonging to InDesign.
+
+    Returns True if a dialog was dismissed, False otherwise.
+    """
+    found = []
+
+    def callback(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) == "#32770":
+            title = win32gui.GetWindowText(hwnd)
+            if "indesign" in title.lower() or "adobe" in title.lower():
+                found.append(hwnd)
+                win32gui.SendMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+
+    try:
+        win32gui.EnumWindows(callback, None)
+    except Exception:
+        pass
+    return len(found) > 0
+
+
+def _extract_uxp_result(app, t0: float, timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """Poll for UXP script execution result from label.
+
+    Handles asynchronous Promise resolution and catches/dismisses any
+    modal syntax error dialogs triggered by InDesign's UXP engine.
+    """
+    raw_result = ""
+    poll_interval = 0.01
+
+    while time.monotonic() - t0 < timeout:
+        try:
+            raw_result = app.ExtractLabel(_UXP_LABEL_KEY)
+            if raw_result:
+                try:
+                    app.InsertLabel(_UXP_LABEL_KEY, "")
+                except Exception:
+                    pass
+                break
+        except pywintypes.com_error as e:
+            # A modal dialog is blocking COM calls (e.g. parse/syntax error)
+            if _dismiss_indesign_modal_dialogs():
+                time.sleep(0.05)
+                return {
+                    "success": False,
+                    "error": "Syntax or parse error in UXP script triggered a modal error dialog in InDesign (auto-dismissed). Check script syntax.",
+                    "name": "SyntaxError",
+                    "line": -1,
+                    "_elapsed_s": round(time.monotonic() - t0, 2),
+                    "_engine": "uxp",
+                }
+        except Exception:
+            pass
+
+        # Check if an engine modal error dialog appeared (e.g. syntax/parse error)
+        if (time.monotonic() - t0) > 0.2:
+            if _dismiss_indesign_modal_dialogs():
+                time.sleep(0.05)
+                return {
+                    "success": False,
+                    "error": "Syntax or parse error in UXP script triggered a modal error dialog in InDesign (auto-dismissed). Check script syntax.",
+                    "name": "SyntaxError",
+                    "line": -1,
+                    "_elapsed_s": round(time.monotonic() - t0, 2),
+                    "_engine": "uxp",
+                }
+
+        time.sleep(poll_interval)
+        if poll_interval < 0.05:
+            poll_interval += 0.01
+
+    elapsed = round(time.monotonic() - t0, 2)
+    if raw_result:
+        parsed = _parse_result(raw_result)
+    else:
+        # Timeout occurred - check if a modal dialog was lingering
+        if _dismiss_indesign_modal_dialogs():
+            parsed = {
+                "success": False,
+                "error": "Syntax or parse error in UXP script triggered a modal error dialog in InDesign (auto-dismissed).",
+                "name": "SyntaxError",
+                "line": -1,
+            }
+        else:
+            parsed = {
+                "success": False,
+                "error": f"UXP script execution timed out after {timeout}s (pending async Promise, setTimeout/setInterval timer, or unresolved fetch). Note: macrotask timers and network sockets are not pumped in standalone COM scripts.",
+                "name": "TimeoutError",
+                "line": -1,
+            }
+
+    parsed["_elapsed_s"] = elapsed
+    parsed["_engine"] = "uxp"
+    return parsed
+
+
+def _execute_uxp_with_undo(app, uxp_code: str, undo_name: str,
+                           undo_mode: int = UNDO_ENTIRE_SCRIPT) -> dict:
+    """Execute UXP script via DoScript with explicit UndoMode and label extraction."""
+    _dismiss_indesign_modal_dialogs()
+    t0 = time.monotonic()
+    try:
+        try:
+            app.InsertLabel(_UXP_LABEL_KEY, "")
+        except Exception:
+            pass
+
+        app.DoScript(
+            uxp_code,
+            SCRIPT_LANGUAGE_UXPSCRIPT,
+            [],                    # withArguments (empty)
+            undo_mode,             # UndoModes enum value
+            undo_name,
+        )
+        return _extract_uxp_result(app, t0)
+    except pywintypes.com_error as e:
+        _dismiss_indesign_modal_dialogs()
+        return _com_error_to_dict(e)
+
+
+def _execute_uxp(app, uxp_code: str) -> dict:
+    """Execute UXP script via plain DoScript (no undo parameters)."""
+    _dismiss_indesign_modal_dialogs()
+    t0 = time.monotonic()
+    try:
+        try:
+            app.InsertLabel(_UXP_LABEL_KEY, "")
+        except Exception:
+            pass
+
+        app.DoScript(uxp_code, SCRIPT_LANGUAGE_UXPSCRIPT)
+        return _extract_uxp_result(app, t0)
+    except pywintypes.com_error as e:
+        _dismiss_indesign_modal_dialogs()
         return _com_error_to_dict(e)
 
 

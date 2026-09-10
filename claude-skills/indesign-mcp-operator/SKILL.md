@@ -38,14 +38,34 @@ For strictly read-only checks, use `undo_mode="none"`.
 - Keep persistent labels only when they have proven cross-session value.
 - Optionally maintain `_agentLabelRegistry` with all persistent keys.
 
-## JSX Rules
-- Use ES3 syntax only (`var`, classic functions).
+## Script Engine & Language Selection
+`run_jsx` supports two engines via the `language` parameter:
+
+| Engine | Parameter | JavaScript Standard | Best For |
+|---|---|---|---|
+| **ExtendScript (Default)** | `language="javascript"` | ES3 | 95% of tasks: layout, typography, styles, find/change, tables, File/Folder IO. Highest model world-knowledge & accuracy. |
+| **UXP Scripting** | `language="uxp"` | ES6+ / V8 | Complex data transformation (`map`/`filter`/`reduce`, `Set`, `Map`, destructuring, top-level `await` / `Promise.all`), native JSON. |
+
+### Decision Rule
+- **DEFAULT to ExtendScript (`language="javascript"`)**: Do NOT assume modern is automatically better. ExtendScript has decades of training data and maximum reliability for InDesign DOM operations.
+- **USE UXP (`language="uxp"`) selectively**: Only when modern JS features significantly simplify data preparation.
+- **Do NOT use `fetch()` in InDesign scripts**: Standalone UXP scripts do not pump background socket loops. Fetch external HTTP/API data in Python/MCP and pass the data payload into InDesign.
+
+## ExtendScript (JSX) Rules (`language="javascript"`)
+- Use ES3 syntax only (`var`, classic functions, no arrow functions/const/let).
 - Assign outputs to `__result`; do not use `return`.
 - Prefer collection APIs over loops:
   - `everyItem()`, `itemByName()`, `itemByID()`, `itemByRange()`.
 - Clear find/change prefs before usage:
   - `app.findTextPreferences = NothingEnum.NOTHING`
   - `app.changeTextPreferences = NothingEnum.NOTHING`
+
+## UXP Script Rules (`language="uxp"`)
+- Must import InDesign DOM: `const { app, ...enums } = require('indesign');` (or `require('indesign').app`).
+- Enums are exported by `require('indesign')` (e.g. `const { Justification, UndoModes } = require('indesign');`).
+- Top-level `await` is natively supported inside user code.
+- Assign outputs to `__result` (the MCP wrapper handles serialisation via labels).
+- All runtime exceptions and engine syntax errors are safely caught and auto-dismissed by the MCP wrapper.
 
 ## Safety Gates
 Before mutation:

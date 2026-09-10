@@ -451,6 +451,267 @@
       "added": "2026-02-23",
       "source": "auto-submission",
       "example_bad": "var tmpKey = \"_tmp_processedIds\";\ndoc.insertLabel(tmpKey, ids.join(\",\"));\n// ... use data across calls ...\ndoc.insertLabel(tmpKey, \"\"); // mandatory cleanup\n\ndoc.insertLabel(\"agentContext_layoutMap\", JSON.stringify(layoutMap));\nvar keys = (doc.extractLabel(\"_agentLabelRegistry\") || \"\").split(\",\");\nif (keys.indexOf(\"agentContext_layoutMap\") < 0) keys.push(\"agentContext_layoutMap\");\ndoc.insertLabel(\"_agentLabelRegistry\", keys.join(\",\"));"
+    },
+    {
+      "id": "color-instanceof-fails-use-doc-colors",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "instanceof Color",
+        "color space",
+        "swatches",
+        "colorValue"
+      ],
+      "problem": "doc.swatches returns items as generic Swatch class; instanceof Color fails. color.space returns numeric enum values, not strings.",
+      "solution": "Use doc.colors to access Color instances directly. Compare space as integer: CS_CMYK=1129142603, CS_HSB=1665684290, CS_LAB=1665941826, CS_RGB=1666336578.",
+      "added": "2026-06-30",
+      "source": "auto-submission"
+    },
+    {
+      "id": "findtext-special-typographic-spaces",
+      "category": "extendscript",
+      "severity": "warning",
+      "triggers": [
+        "findText",
+        "find text",
+        "0 results",
+        "not found",
+        "special spaces",
+        "hair space",
+        "thin space",
+        "non-breaking space",
+        "typographic",
+        "charCodeAt",
+        "String.fromCharCode",
+        "RTF import",
+        "search string"
+      ],
+      "problem": "findText fails to match strings containing special spaces (hair space U+200A, thin space U+2009, non-breaking space U+00A0, en space U+2002, etc.) when the search string uses regular ASCII space (U+0020). Common in typographically refined text from layouts, word processors, or RTF imports.",
+      "solution": "When findText returns 0 results for a string that visually appears in the frame, inspect actual character codes with charCodeAt(). Common culprits: hair space (8198/U+200A), thin space (8201/U+2009), non-breaking space (160/U+00A0), en space (8194/U+2002), figure space (8199/U+2007). Build the search string with String.fromCharCode() for the correct code point. Also watch for: typographic quotes (U+201C/201D/2018/2019), en dash (U+2013), fi/fl ligatures (U+FB01/FB02).",
+      "added": "2026-06-30",
+      "source": "auto-submission",
+      "example_good": "// Diagnose: inspect char codes around expected match position\nvar fullText = tf.texts[0].contents;\nvar idx = fullText.indexOf(\"Mai\");\nvar codes = [];\nfor (var i = idx - 10; i < idx + 5; i++) {\n    codes.push(fullText.charCodeAt(i) + \"=\" + fullText[i]);\n}\n// Rebuild search string with correct codes:\nvar hairSpace = String.fromCharCode(8198); // U+200A\napp.findTextPreferences.findWhat = \"8.\" + hairSpace + \"bis 10.\" + hairSpace + \"Mai 2026\";"
+    },
+    {
+      "id": "app-bringttofront-not-a-function",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "bringToFront",
+        "activate",
+        "foreground",
+        "modal dialog",
+        "dialog hidden",
+        "dialog behind"
+      ],
+      "problem": "app.bringToFront() does not exist in InDesign ExtendScript — throws error 24 \"is not a function\".",
+      "solution": "Use app.activate() instead — this is the correct DOM method to bring InDesign to the foreground before showing a modal dialog.",
+      "added": "2026-06-30",
+      "source": "auto-submission",
+      "example_bad": "app.bringToFront(); // ERROR: not a function",
+      "example_good": "app.activate(); // correct"
+    },
+    {
+      "id": "afteropen-layout-not-ready-use-idletask",
+      "category": "extendscript",
+      "severity": "warning",
+      "triggers": [
+        "afterOpen",
+        "nulled objects",
+        "zero scale",
+        "transient",
+        "watchdog",
+        "IdleTask"
+      ],
+      "problem": "afterOpen event fires before InDesign completes layout recomposition. Nulled-object scans at this moment report false positives (zero-scale objects that resolve once InDesign stabilizes).",
+      "solution": "Delay scans triggered by afterOpen using an IdleTask. This ensures transforms are fully resolved before inspection.",
+      "added": "2026-06-30",
+      "source": "auto-submission"
+    },
+    {
+      "id": "textframe-threading-insert-auto-chain",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "threading",
+        "previousTextFrame",
+        "nextTextFrame",
+        "text frame insertion",
+        "story chain",
+        "duplicate frame threading"
+      ],
+      "problem": "Setting frame.previousTextFrame = X when X already has a nextTextFrame Y inserts the frame BETWEEN X and Y rather than disconnecting Y. Subsequently re-assigning frame.nextTextFrame = Y throws 'Invalid object for this request'.",
+      "solution": "When inserting frames into an existing thread chain, only set previousTextFrame on each new frame in order — do NOT explicitly re-attach the original next-frame at the tail. InDesign auto-shifts the existing nextTextFrame down the chain.",
+      "added": "2026-06-30",
+      "source": "auto-submission",
+      "example_bad": "for (var m = 1; m < N; m++) { frames[m].previousTextFrame = frames[m-1]; }\nframes[N-1].nextTextFrame = origNext; // throws if origNext was src.nextTextFrame",
+      "example_good": "// Drop the tail re-attach — InDesign already chained origNext after frames[N-1]\nfor (var m = 1; m < N; m++) { frames[m].previousTextFrame = frames[m-1]; }"
+    },
+    {
+      "id": "folder-getfiles-glob-user-strings",
+      "category": "extendscript",
+      "severity": "warning",
+      "triggers": [
+        "getFiles",
+        "Folder.getFiles",
+        "glob mask",
+        "file name matching",
+        "version detection",
+        "path separator",
+        "slash in filename",
+        "escapeRegExp",
+        "decodeURI",
+        "wildcard"
+      ],
+      "problem": "Folder.getFiles(maskString) treats the argument as a file-system glob, so '/' and '\\' are read as PATH SEPARATORS and '[' ']' '*' '?' as wildcards. Passing a user-fed string (e.g. a section marker or label containing slashes) silently matches nothing instead of erroring, breaking file lookups (e.g. version detection that always returns v1 and overwrites existing files).",
+      "solution": "Never build a getFiles() glob mask from user-controlled strings. Use the predicate form getFiles(function(f){ return regex.test(decodeURI(f.name)); }) with a RegExp built from escapeRegExp() of the sanitized string. Match against decodeURI(f.name), guarded by try/catch so a stray '%' cannot throw.",
+      "added": "2026-06-30",
+      "source": "auto-submission",
+      "example_bad": "// Slashes in `identifier` become path separators -> no match -> always v1\nvar files = Folder(path).getFiles(baseName + '*_' + identifier + '_v*.pdf');",
+      "example_good": "var safe = sanitizeFileNameSegment(identifier);\nvar re = new RegExp(\"^\" + escapeRegExp(baseName) + \".*_\" + escapeRegExp(safe) + \"_v(\\\\d+)\\\\.pdf$\", \"i\");\nfunction decodeName(f){ try { return decodeURI(f.name); } catch(e){ return String(f.name); } }\nvar files = Folder(path).getFiles(function(f){ return (f instanceof File) && re.test(decodeName(f)); });"
+    },
+    {
+      "id": "paragraph-contents-trailing-r-style-bleed",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "paragraph.contents",
+        "trailing \\r",
+        "style bleed",
+        "overwrite paragraph text",
+        "pilcrow",
+        "paragraph style leaks to next paragraph"
+      ],
+      "problem": "Overwriting paragraph.contents including its own trailing \\r (e.g. p.contents = \"new text\\r\") can cause the paragraph's style to bleed forward onto the NEXT paragraph, corrupting adjacent paragraph styling even though that paragraph's text was untouched. No error is thrown — the corruption is silent.",
+      "solution": "Never include the trailing \\r when replacing a paragraph's text. Replace only the characters before the pilcrow: if (p.characters[len-1].contents === \"\\r\") { p.characters.itemByRange(0, len-2).contents = newText; } This leaves the paragraph-mark/style boundary completely untouched and prevents style bleed to the following paragraph.",
+      "added": "2026-09-10",
+      "source": "auto-submission",
+      "example_bad": "p.contents = \"new text\\r\"; // may bleed style to next paragraph",
+      "example_good": "var len = p.characters.length;\nif (p.characters[len-1].contents === \"\\r\") {\n    p.characters.itemByRange(0, len-2).contents = newText;\n} else {\n    p.contents = newText;\n}"
+    },
+    {
+      "id": "insertparagraphafter-batch-misplacement",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "insertParagraphAfter",
+        "insertionPoints[-1]",
+        "multiple paragraph insertions",
+        "batch insert paragraphs",
+        "misplaced paragraph",
+        "off by one insertion",
+        "TOC update"
+      ],
+      "problem": "Multiple sequential insertParagraphAfter() calls within one run_jsx batch, targeting paragraph object references captured up front (before any insertions ran), land in the wrong position from the 2nd insertion onward — each new paragraph tends to appear one slot too early. The first insertion works correctly; only later ones in the same script drift.",
+      "solution": "Do not batch multiple structural paragraph insertions targeting different pre-captured paragraph refs in a single run_jsx call. Instead, perform ONE insertion per run_jsx call, re-fetching the target paragraph fresh (e.g. by matching distinctive text content via story.paragraphs loop) immediately before each insertion, and verify placement with a read-only pass before the next insertion.",
+      "added": "2026-09-10",
+      "source": "auto-submission"
+    },
+    {
+      "id": "character-by-character-cleanup-unresponsive",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "character-by-character cleanup",
+        "long stories",
+        "HTML export",
+        "story split",
+        "InDesign unresponsive"
+      ],
+      "problem": "Scanning and removing characters one by one across all long export stories can leave InDesign unresponsive for minutes and force process termination (MCP request timeouts, Responding=False).",
+      "solution": "Keep structural edits in a short undo transaction; post-process icon spans in exported HTML rather than in the live document; split threaded stories by capturing the destination frame insertion index, unlinking it, then moving the trailing text range into the new story in one operation.",
+      "added": "2026-09-10",
+      "source": "auto-submission",
+      "example_good": "var start = splitFrame.insertionPoints[0].index;\nsplitFrame.previousTextFrame = NothingEnum.NOTHING;\noldStory.characters.itemByRange(start, oldStory.characters.length - 1).move(LocationOptions.AT_BEGINNING, splitFrame.parentStory.insertionPoints[0]);"
+    },
+    {
+      "id": "uxp-require-indesign-import",
+      "category": "uxp",
+      "severity": "blocker",
+      "triggers": [
+        "uxp",
+        "require('indesign')",
+        "app is undefined",
+        "ScriptLanguage.UXPSCRIPT",
+        "uxp enums",
+        "uxp import"
+      ],
+      "problem": "In UXP scripts, 'app' and InDesign Enums (Justification, UndoModes, ExportFormat, etc.) are not globally available by default.",
+      "solution": "Always import InDesign DOM objects and Enums explicitly with `const { app, Justification, UndoModes } = require('indesign');` in UXP code.",
+      "added": "2026-09-10",
+      "source": "curated",
+      "example_bad": "const doc = app.activeDocument; // ReferenceError: app is not defined in UXP",
+      "example_good": "const { app } = require('indesign');\nconst doc = app.activeDocument;"
+    },
+    {
+      "id": "uxp-unhandled-exceptions-modal-dialog",
+      "category": "uxp",
+      "severity": "blocker",
+      "triggers": [
+        "uxp",
+        "modal dialog",
+        "unhandled error",
+        "Die Anforderung kann nicht bearbeitet werden",
+        "COM lockup",
+        "modal alert"
+      ],
+      "problem": "Unhandled runtime exceptions in UXP scripts can trigger modal InDesign alert dialogs that block subsequent COM/OLE requests with an active modal dialog error.",
+      "solution": "Always wrap UXP logic in try/catch or use the MCP `run_jsx(..., language='uxp')` wrapper which catches errors safely and serializes structured error messages.",
+      "added": "2026-09-10",
+      "source": "curated"
+    },
+    {
+      "id": "uxp-doscript-com-return-value",
+      "category": "uxp",
+      "severity": "warning",
+      "triggers": [
+        "uxp",
+        "DoScript",
+        "return value",
+        "None",
+        "null return",
+        "COM return"
+      ],
+      "problem": "COM app.DoScript(code, ScriptLanguage.UXPSCRIPT) does not return the last evaluated expression value directly, returning None instead.",
+      "solution": "Assign return data to `__result` so the MCP wrapper serializes it via ScriptLabels, or use explicit insertLabel/extractLabel or ScriptArgs.",
+      "added": "2026-09-10",
+      "source": "curated"
+    },
+    {
+      "id": "prefer-extendscript-over-uxp-for-llm",
+      "category": "execution",
+      "severity": "tip",
+      "triggers": [
+        "uxp vs extendscript",
+        "language choice",
+        "which engine",
+        "modern javascript vs jsx",
+        "language selection"
+      ],
+      "problem": "Agents may default to UXP assuming newer is always better, but LLM training data for ExtendScript InDesign DOM is far larger and more reliable.",
+      "solution": "Default to ExtendScript (`language='javascript'`) for 95% of tasks (layout, DOM, styling, table ops). Use UXP (`language='uxp'`) selectively for complex data transformations (Array map/filter/reduce, Set, Map, async data loops), or native JSON handling.",
+      "added": "2026-09-10",
+      "source": "curated"
+    },
+    {
+      "id": "uxp-macrotask-timers-fetch-unsupported",
+      "category": "uxp",
+      "severity": "warning",
+      "triggers": [
+        "uxp setTimeout",
+        "setInterval",
+        "uxp fetch",
+        "fetch in script",
+        "timer in script",
+        "macrotask",
+        "event loop",
+        "timeout",
+        "socket loop"
+      ],
+      "problem": "Calling `setTimeout()`, `setInterval()`, or `fetch()` inside standalone UXP scripts via COM/DoScript does not resolve because InDesign's main-thread macrotask event loop is not pumped during synchronous execution, causing scripts to time out.",
+      "solution": "Do not rely on macrotask timers (`setTimeout`/`setInterval`) or `fetch()` inside InDesign UXP scripts. Use synchronous/microtask async code (`Promise.resolve`, `Promise.all`, async computation). Perform timers and HTTP requests in the external agent/Python layer.",
+      "added": "2026-09-10",
+      "source": "curated"
     }
   ]
 }

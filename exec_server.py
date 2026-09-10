@@ -41,24 +41,33 @@ GOTCHAS_PATH = BASE_DIR / "gotchas.json"
 SUBMISSIONS_DIR = BASE_DIR / "submissions"
 SUBMISSIONS_PATH = SUBMISSIONS_DIR / "pending.jsonl"
 
-ALLOWED_LEARNING_CATEGORIES = {"dom", "scriptui", "extendscript", "execution", "serialization"}
+ALLOWED_LEARNING_CATEGORIES = {"dom", "scriptui", "extendscript", "uxp", "execution", "serialization"}
 ALLOWED_LEARNING_SEVERITIES = {"blocker", "warning", "tip"}
 SEVERITY_RANK = {"tip": 1, "warning": 2, "blocker": 3}
 
 mcp = FastMCP(
     "InDesign Exec",
     instructions=(
-        "This server executes ExtendScript (JSX) code directly in a running Adobe InDesign instance. "
+        "This server executes ExtendScript (JSX) and UXP JavaScript code directly in a running Adobe InDesign instance. "
         "Use run_jsx to perform operations in InDesign documents. Every run_jsx call with "
         "undo_mode='entire' (default) groups all changes under a single undo step, so "
         "Ctrl+Z reverts the entire operation. Use the undo tool to programmatically revert changes.\n\n"
-        "IMPORTANT: In your JSX code, assign the return value to the variable __result. Example:\n"
+        "EXECUTION ENGINES & LANGUAGE SELECTION:\n"
+        "  run_jsx supports language='javascript' (ExtendScript ES3, DEFAULT) and language='uxp' (ES6+ / V8).\n"
+        "  - DEFAULT TO ExtendScript (language='javascript'): massive LLM training corpus, zero-overhead DOM calls, "
+        "proven collection API (everyItem), unconstrained File/Folder access. Use for 95% of tasks.\n"
+        "  - USE UXP (language='uxp') SELECTIVELY: when modern JS simplifies complex data processing "
+        "(Array map/filter/reduce, destructuring, Set/Map, top-level await / async functions, native JSON).\n"
+        "  - In UXP code: ALWAYS import InDesign objects with: const { app, ...enums } = require('indesign'); and assign return value to __result.\n"
+        "  - Note on Network / Fetch: Standalone InDesign UXP scripts via COM do not pump background socket loops; "
+        "perform HTTP/API fetches in the agent/MCP layer and pass data into scripts.\n\n"
+        "IMPORTANT: In your code, assign the return value to the variable __result. Example:\n"
         "  var doc = app.activeDocument;\n"
         "  __result = {name: doc.name, pages: doc.pages.length};\n\n"
         "Do NOT use return statements — the wrapper handles serialisation.\n"
         "Always verify results after modifications using eval_expression or get_document_info.\n"
         "Use the InDesign DOM MCP server to look up classes, properties and methods "
-        "before writing JSX code.\n\n"
+        "before writing script code.\n\n"
         "PERFORMANCE: InDesign has a powerful Collection API. ALWAYS prefer collection methods "
         "over manual for-loops:\n"
         "  - everyItem() for bulk operations: collection.everyItem().prop = value (ONE command for ALL items)\n"
@@ -111,7 +120,7 @@ mcp = FastMCP(
         "For a comprehensive cheatsheet with examples, call the get_quick_reference tool.\n\n"
         "LEARNING FEEDBACK LOOP:\n"
         "  - Use report_learning(...) to submit newly discovered bugs, gotchas, and best practices.\n"
-        "  - Use get_gotchas(context?) to retrieve curated gotchas before writing complex JSX.\n"
+        "  - Use get_gotchas(context?) to retrieve curated gotchas before writing complex scripts.\n"
         "  - Maintainers can promote local submissions with: python manage.py review-submissions\n\n"
         "OPERATIONAL POLICY FOR AGENTS (MUST/SHOULD):\n"
         "  - MUST run get_gotchas(context) before implementing a non-trivial InDesign task.\n"
@@ -145,6 +154,30 @@ Assign your return value to `__result`. The wrapper serialises it as JSON.
 
 If you don't assign __result, the tool returns `{success: true, result: null}`.
 Do NOT use `return` — the wrapper handles that.
+
+## Language Selection: ExtendScript vs UXP
+
+`run_jsx` supports two script engines via the `language` parameter:
+
+| Engine | Parameter | JavaScript Standard | Best For |
+|---|---|---|---|
+| **ExtendScript (Default)** | `language="javascript"` | ES3 | 95% of tasks: layout, typography, styles, find/change, tables, File/Folder IO. Highest model accuracy. |
+| **UXP Scripting** | `language="uxp"` | ES6+ / V8 | Complex data transformation (`map`/`filter`/`reduce`, `Set`, `Map`, destructuring, top-level `await` / `Promise.all`), native JSON. |
+
+### Decision Rule for Agents
+**Default to ExtendScript (`language="javascript"`).** Only switch to `language="uxp"` when modern JS features (array processing, Set/Map, async data loops, native JSON) significantly simplify the code.
+
+### Writing UXP Scripts (`language="uxp"`)
+In UXP scripts, InDesign DOM objects and enums must be imported via `require('indesign')`:
+
+    const { app, Justification, UndoModes } = require('indesign');
+    const doc = app.activeDocument;
+    const items = doc.pages.everyItem().name.map(name => ({ pageName: name }));
+    __result = { count: items.length, items: items };
+
+The MCP wrapper wraps UXP code in an `async` IIFE (enabling top-level `await`), safely polls for async Promise completion, catches runtime exceptions, and automatically dismisses modal syntax-error dialogs.
+
+Note: Standalone InDesign scripts via COM do not pump background socket loops for `fetch()`. Perform network/HTTP fetches in the agent/MCP layer and pass data into scripts.
 
 ## Undo Modes
 - `undo_mode="entire"` (default) — groups ALL changes as one Ctrl+Z step.
@@ -426,17 +459,32 @@ def run_jsx(
     code: str,
     undo_name: str = "Agent Script",
     undo_mode: str = "entire",
+    language: str = "javascript",
 ) -> str:
-    """Execute JSX (ExtendScript) code in InDesign.
+    """Execute ExtendScript (JSX) or UXP JavaScript code in InDesign.
 
     The code runs inside a safety wrapper that catches errors and returns
     structured results. When undo_mode is 'entire' (default), all changes
     are grouped under a single undo step labeled with undo_name.
 
     IMPORTANT: Assign the value you want to return to the variable __result.
-    Example:
+    Example (ExtendScript - Default):
         var doc = app.activeDocument;
         __result = {name: doc.name, pages: doc.pages.length};
+
+    Example (UXP - Modern JS):
+        const { app } = require('indesign');
+        const doc = app.activeDocument;
+        const names = doc.pages.everyItem().name;
+        __result = { pages: names.map(n => ({ name: n })) };
+
+    LANGUAGE SELECTION:
+      - language='javascript' (ExtendScript ES3, DEFAULT): Recommended for 95% of tasks.
+        Unrivalled model world knowledge, maximum stability, unconstrained File/Folder access.
+      - language='uxp' (Modern JS ES6+ / V8): Use selectively when complex data transformations
+        (Array map/filter/reduce, destructuring, Set/Map, async/await), native fetch, or native JSON
+        handling are clearly advantageous.
+        NOTE: In UXP, always import DOM with `const { app } = require('indesign');`.
 
     PERFORMANCE — prefer InDesign Collection methods over loops:
         // GOOD: bulk operation via everyItem() — one command for all items
@@ -449,18 +497,19 @@ def run_jsx(
     Only use loops when each element needs a DIFFERENT value.
 
     Args:
-        code: The JSX code to execute. Assign to __result to return data.
+        code: The script code to execute. Assign to __result to return data.
         undo_name: Human-readable label for Edit > Undo (e.g. "Agent: Format headings")
         undo_mode: "entire" groups all changes as one undo step (default),
                    "auto" lets InDesign handle undo per-operation,
                    "none" skips undo tracking (for read-only operations)
+        language: "javascript" for ExtendScript ES3 (default) or "uxp" for modern JS (ES6+/V8)
     """
     err = _check_connection()
     if err:
         return _fmt({"success": False, "error": err})
 
     try:
-        result = com.run_jsx(code, undo_name=undo_name, undo_mode=undo_mode)
+        result = com.run_jsx(code, undo_name=undo_name, undo_mode=undo_mode, language=language)
         return _fmt(result)
     except Exception as e:
         return _fmt({"success": False, "error": str(e), "name": type(e).__name__})
@@ -1198,6 +1247,26 @@ _QUICK_REFERENCE = """\
   - try/catch around .parentPage (null for items on pasteboard)
   - Assign to __result (no return statement in run_jsx)
   - Use everyItem() for bulk ops (see Collection Patterns in server instructions)
+
+## UXP Scripting Reference (language='uxp')
+  // Use language='uxp' in run_jsx when ES6+ / V8 features are specifically beneficial.
+  // 1. Import InDesign DOM & Enums:
+  const { app, Justification, UndoModes, ExportFormat } = require('indesign');
+  
+  // 2. Modern JS Data Operations:
+  const doc = app.activeDocument;
+  const pageNames = doc.pages.everyItem().name;
+  const processed = pageNames
+    .filter(name => name !== 'Cover')
+    .map((name, idx) => ({ page: name, index: idx }));
+  
+  // 3. Set, Map, Destructuring, Template Literals:
+  const uniqueStyles = new Set(doc.allParagraphStyles.map(s => s.name));
+  const { width, height } = { width: 210, height: 297 };
+  const label = `Doc: ${doc.name} (${width}x${height}mm)`;
+  
+  // 4. Return via __result:
+  __result = { summary: label, stylesCount: uniqueStyles.size, pages: processed };
 """
 
 

@@ -13,24 +13,25 @@
 Two MCP servers for Adobe InDesign:
 
 - **InDesign DOM MCP** (`server.py`): query InDesign DOM + ExtendScript JavaScript Core + ScriptUI classes from a local SQLite database built from XML sources.
-- **InDesign Exec MCP** (`exec_server.py`): execute ExtendScript (JSX) in a running InDesign instance via Windows COM/OLE and return structured JSON results.
+- **InDesign Exec MCP** (`exec_server.py`): execute ExtendScript (JSX) or UXP JavaScript in a running InDesign instance via Windows COM/OLE and return structured JSON results.
 
 ## What This Is
 
 This project exposes two complementary servers to agents:
 
 - **DOM server**: fast, read-only access to the object model without loading the entire DOM into the model context.
-- **Exec server**: safe JSX execution with undo grouping and DOM-safe JSON serialization.
+- **Exec server**: safe script execution with undo grouping, dual-engine support (ExtendScript ES3 & UXP ES6+), and safe JSON serialization.
 
-## How This Differs from UXP-based Approaches
+## Script Engines & Language Selection
 
-| Aspect | This project | UXP-based MCP |
+| Aspect | ExtendScript (`language="javascript"`) | UXP Scripting (`language="uxp"`) |
 |---|---|---|
-| Scripting engine | ExtendScript (ES3) | UXP (modern JavaScript) |
-| JSON | Polyfill required (`json_polyfill.jsx`) | Native |
-| Communication | Windows COM/OLE (synchronous, blocking) | Plugin bridge layer |
-| Setup | Zero-setup: start InDesign, run MCP | Requires UXP plugin install |
-| Future | ExtendScript is being phased out by Adobe | Adobe's strategic direction |
+| **Role** | **Default engine (recommended for 95% of tasks)** | **Selective engine (for complex ES6+ data ops)** |
+| **JS Standard** | ES3 + Adobe Extensions | Modern ES6+ / V8 Engine |
+| **Model World Knowledge** | Massive (20+ years of community scripts/docs) | Limited (fewer public examples) |
+| **Best For** | Layout, typography, styles, find/change, tables, File/Folder IO | Array `map`/`filter`/`reduce`, `Set`/`Map`, destructuring, top-level `await`, native JSON |
+| **DOM Import** | Global `app` automatically available | `const { app } = require('indesign');` required |
+| **Setup** | Zero-setup (runs via COM `DoScript`) | Zero-setup (runs via COM `DoScript` with UXP mode) |
 
 ## Architecture
 
@@ -43,18 +44,18 @@ flowchart LR
   SQLite --> DomServer["server.py (InDesign DOM MCP)"]
   Agent[Agent] --> DomServer
   Agent --> ExecServer["exec_server.py (InDesign Exec MCP)"]
-  ExecServer --> COM[COM/OLE]
-  COM --> InDesign["Adobe InDesign (running)"]
+  ExecServer --> COM[COM/OLE DoScript]
+  COM --> InDesign["Adobe InDesign (running)\n[ExtendScript ES3 / UXP V8]"]
 ```
 
 Core files:
 
 - `server.py`: MCP tools for querying the DOM database
-- `exec_server.py`: MCP tools for JSX execution in InDesign
+- `exec_server.py`: MCP tools for script execution in InDesign (ExtendScript & UXP)
 - `parser.py`: OMV XML parser + database builder (SQLite + FTS5)
 - `db.py`: database query layer for DOM tools
 - `manage.py`: CLI to analyze/build/update/validate the database
-- `indesign_com.py`: COM/OLE automation layer + safe JSX wrapper
+- `indesign_com.py`: COM/OLE automation layer + safe JSX/UXP wrapper
 - `json_polyfill.jsx`: ExtendScript JSON polyfill + `__safeStringify()` (DOM-safe)
 - `gotchas.json`: curated gotchas and best-practice knowledge base (community growth via PRs)
 
@@ -76,7 +77,14 @@ Core files:
 
 ### InDesign Exec MCP (`exec_server.py`)
 
-- `run_jsx(code, undo_name="Agent Script", undo_mode="entire")`
+- `run_jsx(code, undo_name="Agent Script", undo_mode="entire", language="javascript"|"uxp")`
+- `get_document_info()`
+- `get_selection(detail_level="basic"|"full")`
+- `eval_expression(expression)`
+- `undo(steps=1)`
+- `report_learning(problem, solution, triggers, category?, severity?, error_message?, jsx_context?)`
+- `get_gotchas(context?)`
+- `get_quick_reference()`
 - `get_document_info()`
 - `get_selection(detail_level="basic"|"full")`
 - `eval_expression(expression)`
@@ -238,6 +246,12 @@ The skill files are located in `claude-skills/indesign-mcp-operator/`:
 - `SKILL.md`: The markdown source of the skill instructions.
 - `reference.md`: Reusable patterns and prompt templates.
 
+## Optional: Cursor Skill (InDesign MCP Operator)
+
+The same workflow is available as a native **Cursor Agent Skill** in `.cursor/skills/indesign-mcp-operator/`. Cursor picks it up automatically from the project; no separate installation step is needed.
+
+- `SKILL.md`: The skill instructions, adapted for Cursor's MCP tool naming.
+- `reference.md`: Reusable patterns and prompt templates.
 
 ## Updating the Database with newer DOM
 
