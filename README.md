@@ -20,9 +20,11 @@ Two MCP servers for Adobe InDesign:
 This project exposes two complementary servers to agents:
 
 - **DOM server**: fast, read-only access to the object model without loading the entire DOM into the model context.
-- **Exec server**: safe script execution with undo grouping, dual-engine support (ExtendScript ES3 & UXP ES6+), and safe JSON serialization.
+- **Exec server**: safe script execution with undo grouping, dual-engine support (ExtendScript ES3 & UXP ES6+), automatic modal dialog protection, and safe JSON serialization.
 
 ## Script Engines & Language Selection
+
+`run_jsx` supports two script engines via the `language` parameter:
 
 | Aspect | ExtendScript (`language="javascript"`) | UXP Scripting (`language="uxp"`) |
 |---|---|---|
@@ -31,7 +33,12 @@ This project exposes two complementary servers to agents:
 | **Model World Knowledge** | Massive (20+ years of community scripts/docs) | Limited (fewer public examples) |
 | **Best For** | Layout, typography, styles, find/change, tables, File/Folder IO | Array `map`/`filter`/`reduce`, `Set`/`Map`, destructuring, top-level `await`, native JSON |
 | **DOM Import** | Global `app` automatically available | `const { app } = require('indesign');` required |
-| **Setup** | Zero-setup (runs via COM `DoScript`) | Zero-setup (runs via COM `DoScript` with UXP mode) |
+| **Execution Bridge** | Windows COM/OLE `DoScript` (synchronous) | Windows COM/OLE `DoScript` (`ScriptLanguage.UXPSCRIPT`) |
+| **Setup** | Zero-setup (start InDesign, run MCP) | Zero-setup (start InDesign, run MCP) |
+
+### Language Selection Policy for Agents
+- **DEFAULT to ExtendScript (`language="javascript"`)**: Decades of documentation and community solutions give LLMs unmatched accuracy for InDesign DOM operations.
+- **USE UXP (`language="uxp"`) selectively**: When modern JS data manipulation (`map`, `filter`, `reduce`, `Set`, `Map`, destructuring, async microtasks) significantly simplifies the task before layout placement.
 
 ## Architecture
 
@@ -55,7 +62,7 @@ Core files:
 - `parser.py`: OMV XML parser + database builder (SQLite + FTS5)
 - `db.py`: database query layer for DOM tools
 - `manage.py`: CLI to analyze/build/update/validate the database
-- `indesign_com.py`: COM/OLE automation layer + safe JSX/UXP wrapper
+- `indesign_com.py`: COM/OLE automation layer + safe JSX/UXP wrapper + modal dialog watchdog
 - `json_polyfill.jsx`: ExtendScript JSON polyfill + `__safeStringify()` (DOM-safe)
 - `gotchas.json`: curated gotchas and best-practice knowledge base (community growth via PRs)
 
@@ -63,35 +70,28 @@ Core files:
 
 ### InDesign DOM MCP (`server.py`)
 
-- `lookup_class(name, source?)`
-- `get_properties(class_name, source?, filter?, include_inherited?)`
-- `get_methods(class_name, source?, filter?, include_inherited?)`
-- `get_method_detail(class_name, method_name, source?)`
-- `get_enum_values(enum_name, source?)`
-- `get_hierarchy(class_name, source?)`
-- `search_dom(query, source?)`
-- `list_classes(suite?, type=all, source?)`
-- `dom_info()`
-- `list_sources()`
-- `knowledge_overview()`
+- `lookup_class(name, source?)`: Look up class description, hierarchy, properties, and methods.
+- `get_properties(class_name, source?, filter?, include_inherited?)`: Get properties of a class.
+- `get_methods(class_name, source?, filter?, include_inherited?)`: Get methods of a class.
+- `get_method_detail(class_name, method_name, source?)`: Get detailed parameter types and return type for a method.
+- `get_enum_values(enum_name, source?)`: Get all member names and numeric values for an enumeration.
+- `get_hierarchy(class_name, source?)`: Get inheritance chain and direct subclasses.
+- `search_dom(query, source?)`: Full-text search across class names, properties, methods, and descriptions.
+- `list_classes(suite?, type=all, source?)`: List classes filtered by suite or type (`class` | `enum` | `all`).
+- `dom_info()`: Database metadata and statistics.
+- `list_sources()`: List indexed knowledge sources (`dom`, `javascript`, `scriptui`).
+- `knowledge_overview()`: High-level overview of the scripting knowledge base.
 
 ### InDesign Exec MCP (`exec_server.py`)
 
-- `run_jsx(code, undo_name="Agent Script", undo_mode="entire", language="javascript"|"uxp")`
-- `get_document_info()`
-- `get_selection(detail_level="basic"|"full")`
-- `eval_expression(expression)`
-- `undo(steps=1)`
-- `report_learning(problem, solution, triggers, category?, severity?, error_message?, jsx_context?)`
-- `get_gotchas(context?)`
-- `get_quick_reference()`
-- `get_document_info()`
-- `get_selection(detail_level="basic"|"full")`
-- `eval_expression(expression)`
-- `undo(steps=1)`
-- `report_learning(problem, solution, triggers, category?, severity?, error_message?, jsx_context?)`
-- `get_gotchas(context?)`
-- `get_quick_reference()`
+- `run_jsx(code, undo_name="Agent Script", undo_mode="entire", language="javascript"|"uxp")`: Execute ExtendScript (ES3) or UXP (ES6+/V8) code with undo grouping and safety wrapping.
+- `get_document_info()`: Overview of the active document (pages, items, styles, active view/spread context).
+- `get_selection(detail_level="basic"|"full")`: Information about the current selection in InDesign.
+- `eval_expression(expression)`: Quickly evaluate a short read-only expression without undo overhead.
+- `undo(steps=1)`: Undo the last operation(s) in the active document.
+- `report_learning(problem, solution, triggers, category?, severity?, error_message?, jsx_context?)`: Submit a local learning entry to the pending queue.
+- `get_gotchas(context?)`: Retrieve curated gotchas and pitfalls, ranked by relevance to a task context.
+- `get_quick_reference()`: Comprehensive DOM cheatsheet with common access paths, collection patterns, and dynamic gotchas.
 
 ## Agentic Usage / Key Patterns
 
@@ -100,39 +100,57 @@ Core files:
 1. Use DOM MCP to look up the correct class/method signature.
 2. For ambiguous class names (`Window`, `Group`, `Panel`, `Event`) pass `source="dom"` or `source="scriptui"`.
 3. For ExtendScript-specific APIs (`UnitValue`, `$`, `File`, `Folder`, `Socket`, `XML`, `XMLList`) use `source="javascript"`.
-4. Write JSX that assigns a plain value to `__result` (do not `return`).
-5. Execute with `run_jsx` and verify with `eval_expression` or `get_document_info`.
-6. If needed, rollback with `undo`.
+4. Write script code that assigns a plain value to `__result` (do not `return`).
+5. Execute with `run_jsx` (defaulting to `language="javascript"`, or `language="uxp"` for ES6+ data transformations).
+6. Verify with `eval_expression` or `get_document_info`.
+7. If needed, rollback with `undo`.
 
-### 2) Recommended agent boot sequence
+### 2) The `__result` Convention
 
-1. `knowledge_overview()`
-2. `list_sources()`
-3. `search_dom(query, source=...)`
-4. `lookup_class(...)` / `get_method_detail(...)`
-5. `indesign-exec` tools (`run_jsx`, `eval_expression`, `undo`)
+The execution wrapper intercepts and serializes `__result` to JSON.
 
-### 3) ScriptUI positioning
-
-ScriptUI remains documented for legacy scripts and small dialogs. For new UI-heavy development, prefer a modern UXP plugin.
-
-### 4) `__result` convention
-
-The wrapper serializes `__result` to JSON. Example:
-
+**ExtendScript (`language="javascript"`, default):**
 ```jsx
 var doc = app.activeDocument;
 __result = { name: doc.name, pages: doc.pages.length };
 ```
 
-### 5) Undo grouping
+**UXP Scripting (`language="uxp"`):**
+```javascript
+const { app, Justification } = require('indesign');
+const doc = app.activeDocument;
+const titles = doc.stories.everyItem().paragraphs.everyItem().contents
+  .map(text => text.trim())
+  .filter(text => text.length > 0);
 
-Use `undo_mode="entire"` and a descriptive `undo_name` so one Ctrl+Z reverts the whole operation.
+__result = { totalParagraphs: titles.length, sample: titles.slice(0, 5) };
+```
 
-### 6) JSON polyfill / safe serialization
+### 3) Undo Grouping
 
-ExtendScript engines can lack `JSON.stringify` or crash when traversing DOM objects.
-This project always provides `__safeStringify()` (and installs `JSON.stringify` if missing).
+Use `undo_mode="entire"` (default) and a descriptive `undo_name` so one Ctrl+Z reverts the whole operation cleanly.
+
+### 4) Collection Patterns (PREFER over loops)
+
+InDesign collections support collective specifiers via `everyItem()` and direct accessors like `itemByName()`, `itemByID()`, `itemByRange()`. These are vastly more efficient because they execute as **one command** in InDesign rather than $N$ round-trips:
+
+```javascript
+// Bulk property write — single operation
+doc.textFrames.everyItem().fillColor = "None";
+
+// Read all page names at once — returns Array
+__result = doc.pages.everyItem().name;
+
+// Direct accessor by name — no loop needed
+var headingStyle = doc.paragraphStyles.itemByName("Heading 1");
+```
+
+### 5) UXP Scripting Notes & Constraints
+
+- **Imports**: In UXP, always import DOM classes and enums with `const { app, ...enums } = require('indesign');`.
+- **Top-Level `await`**: User code is automatically wrapped in an `async` IIFE. Top-level `await Promise.all(...)` and async helper functions work natively.
+- **Modal Dialog Protection**: Unhandled runtime exceptions and syntax errors are caught by the MCP layer. Any InDesign modal dialogs are auto-dismissed to prevent COM lockups.
+- **Timer & Socket Limitations**: Standalone InDesign scripts executed via COM do not pump main-thread macrotasks for `setTimeout()` or `fetch()`. Perform network requests and HTTP API calls in the external Python/Agent environment and pass the data into InDesign.
 
 ## Data Sources
 
@@ -170,9 +188,6 @@ python manage.py build --source dom --xml "C:\\path\\to\\omv$indesign-21.064$21.
 ```bash
 python manage.py validate --expect-sources dom,javascript,scriptui
 ```
-2. Write JSX that assigns a plain value to `__result` (do not `return`).
-3. Execute with `run_jsx` and verify with `eval_expression` or `get_document_info`.
-4. If needed, rollback with `undo`.
 
 ## Prerequisites
 
@@ -221,12 +236,12 @@ Add two servers that run from this repo directory (use stdio transport):
     "indesign-dom": {
       "command": "uv",
       "args": ["run", "server.py"],
-      "cwd": "D:\\\\path\\\\to\\\\indesign_scripting_MCP"
+      "cwd": "D:\\path\\to\\indesign_scripting_MCP"
     },
     "indesign-exec": {
       "command": "uv",
       "args": ["run", "exec_server.py"],
-      "cwd": "D:\\\\path\\\\to\\\\indesign_scripting_MCP"
+      "cwd": "D:\\path\\to\\indesign_scripting_MCP"
     }
   }
 }
@@ -236,36 +251,12 @@ Add two servers that run from this repo directory (use stdio transport):
 
 Add the same server definitions to `claude_desktop_config.json` (the exact file location depends on your OS install).
 
-## Optional: Claude Skill (InDesign MCP Operator)
+## Claude & Cursor Agent Skills
 
-To improve the AI's ability to use `indesign-dom` and `indesign-exec` tools. effectively, we provide a **Claude Skill** that teaches it a robust "inspect-lookup-execute-verify" workflow. This helps prevent common scripting errors and ensures safer execution. The agent will use the MCPs just fine without it, but it smoothes things.
+To maximize agent competence and enforce an inspect-lookup-execute-verify workflow, agent skills are provided for both platforms:
 
-The skill files are located in `claude-skills/indesign-mcp-operator/`:
-
-- `indesign-mcp-operator.skill`: The skill definition file for direct installtion.
-- `SKILL.md`: The markdown source of the skill instructions.
-- `reference.md`: Reusable patterns and prompt templates.
-
-## Optional: Cursor Skill (InDesign MCP Operator)
-
-The same workflow is available as a native **Cursor Agent Skill** in `.cursor/skills/indesign-mcp-operator/`. Cursor picks it up automatically from the project; no separate installation step is needed.
-
-- `SKILL.md`: The skill instructions, adapted for Cursor's MCP tool naming.
-- `reference.md`: Reusable patterns and prompt templates.
-
-## Updating the Database with newer DOM
-
-To update one source:
-
-```bash
-python manage.py update --source dom --xml "C:\\path\\to\\omv$indesign-22.064$22.0.xml"
-```
-
-To rebuild all three sources:
-
-```bash
-python manage.py build-all --dom "C:\\path\\to\\omv$indesign-22.064$22.0.xml" --js "C:\\path\\to\\javascript.xml" --sui "C:\\path\\to\\scriptui.xml"
-```
+- **Cursor Agent Skill**: `.cursor/skills/indesign-mcp-operator/SKILL.md` (automatically detected by Cursor).
+- **Claude Skill**: `claude-skills/indesign-mcp-operator/SKILL.md` and `indesign-mcp-operator.skill`.
 
 ## Contributing Gotchas
 
@@ -273,24 +264,22 @@ The gotchas system is a shared debugging memory for this MCP:
 
 - `gotchas.json` is the curated, versioned knowledge base committed to Git.
 - Entries describe recurring pitfalls, fixes, and trigger keywords for context matching.
-- Agents will query relevant items with `get_gotchas(context, min_severity?, top_n?)` before writing JSX.
+- Agents will query relevant items with `get_gotchas(context, min_severity?, top_n?)` before writing scripts.
 - `get_quick_reference()` includes static guidance and appends community gotchas at runtime.
-- During troubleshooting, agents can and will submit newly resolved issues via `report_learning(...)` to your MCP.
+- During troubleshooting, agents can and will submit newly resolved issues via `report_learning(...)`.
 
-Please commit them as PR to this repo for all to benefit! It keeps successful debugging outcomes reusable across future sessions and across users.
+### Contribution Paths
 
-Two contribution paths are supported:
-
-### A) Direct curated updates via GitHub PR
+#### A) Direct curated updates via GitHub PR
 1. Fork + clone this repository
 2. Edit `gotchas.json` and add a new entry
 3. Open a PR with the new gotcha
 4. Maintainer review and merge
 
-### B) Agent submission -> maintainer review
+#### B) Agent submission -> maintainer review
 1. Your agent calls `report_learning(...)`
 2. Entry is written to `submissions/pending.jsonl` (local queue, not committed)
-3. Maintainer (you) runs:
+3. Maintainer runs:
 
 ```bash
 python manage.py review-submissions
