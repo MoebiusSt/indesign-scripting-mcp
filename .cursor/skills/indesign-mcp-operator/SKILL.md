@@ -86,10 +86,15 @@ For strictly read-only checks, use `undo_mode="none"`.
 Before mutation:
 - Confirm a document is open and correct.
 - Confirm key assumptions with read-only checks.
+- Address the host by `fullName.fsName` / `itemByName`, not by assuming `activeDocument` stays put.
 
 After mutation:
 - Verify the specific target state changed as intended.
 - If partial failure is detected, undo first, then retry with narrower scope.
+- If a `run_jsx` result contains `warning`, a foreign document appeared mid-script (often a toxic null hyperlink). Stop, re-address the host by name, check `unexpected_documents`, then continue.
+
+## Toxic null hyperlinks
+Copied hyperlinks with `destination === null` can open the origin `.indd` when `.destination` is read. `run_jsx` / `eval_expression` detect documents that appear during a script. Saved, unmodified ones are closed (`close_unexpected_documents=true`, default). Modified or untitled ones stay open. Whenever any appeared, the result has a `warning`: treat it as a stop sign and verify the host before the next edit. Still never trust `activeDocument` after hyperlink scans. Load the core every call: `$.evalFile(File(Folder.userData + "/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc"));` then `THL.scan(doc)` / `THL.sanitize(...)`. Gotcha: `toxic-null-hyperlink-opens-origin-document`.
 
 ## Learning Loop
 When a user-reported issue is resolved with clear root cause:
@@ -101,6 +106,8 @@ When a user-reported issue is resolved with clear root cause:
 - Do not persist temporary `_tmp_` labels beyond the task.
 - Do not assume modern JavaScript syntax.
 - Do not mix inspection and destructive edits in one large opaque JSX block when the operation is risky.
+- Do not set `close_unexpected_documents=false` unless the script intentionally opens another document that must stay open.
+- Do not invent hyperlink destination URLs from visible link text.
 
 ## Response Contract
 When reporting task completion:

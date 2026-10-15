@@ -20,6 +20,7 @@ Constraints:
 - `script labels _tmp_ cleanup agentContext_ registry`
 - `allPageItems spread corrupted fallback pageItems`
 - `paragraph style itemByName grouped styles allParagraphStyles`
+- `hyperlink.destination null opens other document activeDocument`
 
 ## Short JSX Patterns
 

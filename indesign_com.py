@@ -78,7 +78,143 @@ def _get_polyfill() -> str:
 # JSX Wrapper
 # ---------------------------------------------------------------------------
 
-def _build_wrapper(user_code: str) -> str:
+# Pin open documents by id before user code; optionally close foreign docs that
+# appear mid-script (toxic null hyperlink.destination, etc.). Only closes
+# foreign docs that are saved and unmodified. $CLOSE_UNEXPECTED$ -> true|false.
+_DOC_PIN_HELPER_ES = (
+    "var __mcpPinnedIds = {};\n"
+    "var __mcpPinnedActiveId = null;\n"
+    "var __mcpUnexpected = [];\n"
+    "var __mcpClosedForeign = [];\n"
+    "try {\n"
+    "    for (var __mcpPi = 0; __mcpPi < app.documents.length; __mcpPi++) {\n"
+    "        try { __mcpPinnedIds[app.documents[__mcpPi].id] = true; } catch (__mcpPe) {}\n"
+    "    }\n"
+    "    if (app.documents.length) {\n"
+    "        try { __mcpPinnedActiveId = app.activeDocument.id; } catch (__mcpPa) {}\n"
+    "    }\n"
+    "} catch (__mcpPs) {}\n"
+    "\n"
+    "function __mcpCloseUnexpected() {\n"
+    "    try {\n"
+    "        var __mcpI, __mcpD, __mcpId, __mcpRec;\n"
+    "        for (__mcpI = app.documents.length - 1; __mcpI >= 0; __mcpI--) {\n"
+    "            __mcpD = app.documents[__mcpI];\n"
+    "            try { __mcpId = __mcpD.id; } catch (__mcpE1) { continue; }\n"
+    "            if (__mcpPinnedIds[__mcpId]) continue;\n"
+    "            __mcpRec = { name: \"\", path: \"\", saved: false, modified: false, closed: false };\n"
+    "            try { __mcpRec.name = String(__mcpD.name); } catch (__mcpE2) {}\n"
+    "            try { __mcpRec.path = String(__mcpD.fullName.fsName); } catch (__mcpE3) {}\n"
+    "            try { __mcpRec.saved = !!__mcpD.saved; } catch (__mcpE4) {}\n"
+    "            try { __mcpRec.modified = !!__mcpD.modified; } catch (__mcpE5) {}\n"
+    "            if ($CLOSE_UNEXPECTED$ && __mcpRec.saved && !__mcpRec.modified) {\n"
+    "                try {\n"
+    "                    __mcpD.close(SaveOptions.NO);\n"
+    "                    __mcpRec.closed = true;\n"
+    "                    __mcpClosedForeign.push(__mcpRec.path);\n"
+    "                } catch (__mcpE6) {}\n"
+    "            }\n"
+    "            __mcpUnexpected.push(__mcpRec);\n"
+    "        }\n"
+    "        if (__mcpPinnedActiveId !== null) {\n"
+    "            for (__mcpI = 0; __mcpI < app.documents.length; __mcpI++) {\n"
+    "                try {\n"
+    "                    if (app.documents[__mcpI].id === __mcpPinnedActiveId) {\n"
+    "                        app.activeDocument = app.documents[__mcpI];\n"
+    "                        break;\n"
+    "                    }\n"
+    "                } catch (__mcpE7) {}\n"
+    "            }\n"
+    "        }\n"
+    "    } catch (__mcpPx) {}\n"
+    "}\n"
+    "\n"
+    "function __mcpWarning() {\n"
+    "    if (!__mcpUnexpected.length) return \"\";\n"
+    "    var kept = [], k;\n"
+    "    for (k = 0; k < __mcpUnexpected.length; k++) {\n"
+    "        if (!__mcpUnexpected[k].closed) kept.push(__mcpUnexpected[k].name);\n"
+    "    }\n"
+    "    var w = \"Foreign document(s) appeared during this script (\" + __mcpUnexpected.length +\n"
+    "            \"). Code after that point that used app.activeDocument may have targeted the wrong file. \" +\n"
+    "            \"Re-check the host by name/id.\";\n"
+    "    if (kept.length) w += \" LEFT OPEN because modified or never saved: \" + kept.join(\", \") +\n"
+    "                          \". Inspect them; do not assume your edits reached the host.\";\n"
+    "    return w;\n"
+    "}\n"
+)
+
+_DOC_PIN_HELPER_UXP = (
+    "let __mcpPinnedIds = {};\n"
+    "let __mcpPinnedActiveId = null;\n"
+    "let __mcpUnexpected = [];\n"
+    "let __mcpClosedForeign = [];\n"
+    "let __mcpIndApp = (typeof app !== 'undefined' && app)"
+    " ? app : (typeof require !== 'undefined' ? require('indesign').app : null);\n"
+    "try {\n"
+    "    if (__mcpIndApp) {\n"
+    "        for (let __mcpPi = 0; __mcpPi < __mcpIndApp.documents.length; __mcpPi++) {\n"
+    "            try { __mcpPinnedIds[__mcpIndApp.documents[__mcpPi].id] = true; } catch (__mcpPe) {}\n"
+    "        }\n"
+    "        if (__mcpIndApp.documents.length) {\n"
+    "            try { __mcpPinnedActiveId = __mcpIndApp.activeDocument.id; } catch (__mcpPa) {}\n"
+    "        }\n"
+    "    }\n"
+    "} catch (__mcpPs) {}\n"
+    "\n"
+    "function __mcpCloseUnexpected() {\n"
+    "    if (!__mcpIndApp) return;\n"
+    "    try {\n"
+    "        const { SaveOptions } = require('indesign');\n"
+    "        for (let __mcpI = __mcpIndApp.documents.length - 1; __mcpI >= 0; __mcpI--) {\n"
+    "            const __mcpD = __mcpIndApp.documents[__mcpI];\n"
+    "            let __mcpId;\n"
+    "            try { __mcpId = __mcpD.id; } catch (__mcpE1) { continue; }\n"
+    "            if (__mcpPinnedIds[__mcpId]) continue;\n"
+    "            const __mcpRec = { name: '', path: '', saved: false, modified: false, closed: false };\n"
+    "            try { __mcpRec.name = String(__mcpD.name); } catch (__mcpE2) {}\n"
+    "            try { __mcpRec.path = String(__mcpD.fullName.fsName); } catch (__mcpE3) {}\n"
+    "            try { __mcpRec.saved = !!__mcpD.saved; } catch (__mcpE4) {}\n"
+    "            try { __mcpRec.modified = !!__mcpD.modified; } catch (__mcpE5) {}\n"
+    "            if ($CLOSE_UNEXPECTED$ && __mcpRec.saved && !__mcpRec.modified) {\n"
+    "                try {\n"
+    "                    __mcpD.close(SaveOptions.NO);\n"
+    "                    __mcpRec.closed = true;\n"
+    "                    __mcpClosedForeign.push(__mcpRec.path);\n"
+    "                } catch (__mcpE6) {}\n"
+    "            }\n"
+    "            __mcpUnexpected.push(__mcpRec);\n"
+    "        }\n"
+    "        if (__mcpPinnedActiveId !== null) {\n"
+    "            for (let __mcpI = 0; __mcpI < __mcpIndApp.documents.length; __mcpI++) {\n"
+    "                try {\n"
+    "                    if (__mcpIndApp.documents[__mcpI].id === __mcpPinnedActiveId) {\n"
+    "                        __mcpIndApp.activeDocument = __mcpIndApp.documents[__mcpI];\n"
+    "                        break;\n"
+    "                    }\n"
+    "                } catch (__mcpE7) {}\n"
+    "            }\n"
+    "        }\n"
+    "    } catch (__mcpPx) {}\n"
+    "}\n"
+    "\n"
+    "function __mcpWarning() {\n"
+    "    if (!__mcpUnexpected.length) return '';\n"
+    "    const kept = [];\n"
+    "    for (let k = 0; k < __mcpUnexpected.length; k++) {\n"
+    "        if (!__mcpUnexpected[k].closed) kept.push(__mcpUnexpected[k].name);\n"
+    "    }\n"
+    "    let w = 'Foreign document(s) appeared during this script (' + __mcpUnexpected.length +\n"
+    "            '). Code after that point that used app.activeDocument may have targeted the wrong file. ' +\n"
+    "            'Re-check the host by name/id.';\n"
+    "    if (kept.length) w += ' LEFT OPEN because modified or never saved: ' + kept.join(', ') +\n"
+    "                          '. Inspect them; do not assume your edits reached the host.';\n"
+    "    return w;\n"
+    "}\n"
+)
+
+
+def _build_wrapper(user_code: str, close_unexpected_documents: bool = True) -> str:
     """Build the full JSX wrapper around user code.
 
     Architecture — **no eval()**:
@@ -88,6 +224,8 @@ def _build_wrapper(user_code: str) -> str:
       (DOM-safe, handles circular refs, dangerous properties, etc.)
     - try/catch provides structured error reporting
     - userInteractionLevel is guarded to prevent modal-dialog blocking
+    - Optionally pins the open-document set and closes foreign docs that
+      appear mid-script (toxic null hyperlink.destination side effect)
     - The IIFE returns a JSON string; DoScript transports it back via COM
 
     Convention for user code::
@@ -96,6 +234,8 @@ def _build_wrapper(user_code: str) -> str:
         __result = {name: doc.name, pages: doc.pages.length};
     """
     polyfill = _get_polyfill()
+    close_lit = "true" if close_unexpected_documents else "false"
+    pin = _DOC_PIN_HELPER_ES.replace("$CLOSE_UNEXPECTED$", close_lit)
 
     # The IIFE ensures a clean scope and allows explicit ``return``.
     # DoScript returns the value of the last expression — the IIFE call.
@@ -105,33 +245,48 @@ def _build_wrapper(user_code: str) -> str:
         "var __result;\n"
         "var __uilevel = app.scriptPreferences.userInteractionLevel;\n"
         "app.scriptPreferences.userInteractionLevel = UserInteractionLevels.neverInteract;\n"
-        "try {\n"
+        + pin
+        + "try {\n"
         # === USER CODE (assigns to __result) ===
         + user_code + "\n"
         # === END USER CODE ===
+        "__mcpCloseUnexpected();\n"
         "app.scriptPreferences.userInteractionLevel = __uilevel;\n"
         "if (typeof __result === 'undefined') {\n"
-        "    return __safeStringify({success: true, result: null});\n"
+        "    return __safeStringify({success: true, result: null"
+        ", closed_unexpected_documents: __mcpClosedForeign"
+        ", unexpected_documents: __mcpUnexpected"
+        ", warning: __mcpWarning()});\n"
         "}\n"
         "try {\n"
-        "    return __safeStringify({success: true, result: __result});\n"
+        "    return __safeStringify({success: true, result: __result"
+        ", closed_unexpected_documents: __mcpClosedForeign"
+        ", unexpected_documents: __mcpUnexpected"
+        ", warning: __mcpWarning()});\n"
         "} catch(jsonErr) {\n"
-        "    return __safeStringify({success: true, result: String(__result)});\n"
+        "    return __safeStringify({success: true, result: String(__result)"
+        ", closed_unexpected_documents: __mcpClosedForeign"
+        ", unexpected_documents: __mcpUnexpected"
+        ", warning: __mcpWarning()});\n"
         "}\n"
         "} catch(e) {\n"
+        "try { __mcpCloseUnexpected(); } catch(x2) {}\n"
         "try { app.scriptPreferences.userInteractionLevel = __uilevel; } catch(x) {}\n"
         "return __safeStringify({\n"
         "    success: false,\n"
         "    error: e.message || String(e),\n"
         "    name: e.name || 'Error',\n"
-        "    line: typeof e.line === 'number' ? e.line : -1\n"
+        "    line: typeof e.line === 'number' ? e.line : -1,\n"
+        "    closed_unexpected_documents: __mcpClosedForeign,\n"
+        "    unexpected_documents: __mcpUnexpected,\n"
+        "    warning: __mcpWarning()\n"
         "});\n"
         "}\n"
         "})();\n"
     )
 
 
-def _build_uxp_wrapper(user_code: str) -> str:
+def _build_uxp_wrapper(user_code: str, close_unexpected_documents: bool = True) -> str:
     """Build the full UXP wrapper around user code.
 
     Architecture for UXP Scripting (ES6+ / V8 engine):
@@ -140,15 +295,19 @@ def _build_uxp_wrapper(user_code: str) -> str:
     - User can import ``const { app } = require('indesign')`` or use global ``app``
     - User assigns return data to ``__result``
     - try/catch intercepts all runtime errors to prevent InDesign modal error dialogs
+    - Optionally pins the open-document set and closes foreign docs mid-script
     - Output is safely written to ``app.insertLabel('__mcp_uxp_result__', ...)``
       because COM DoScript does not return the last expression value for UXP scripts
     - Python polls the label via COM and clears it
     """
+    close_lit = "true" if close_unexpected_documents else "false"
+    pin = _DOC_PIN_HELPER_UXP.replace("$CLOSE_UNEXPECTED$", close_lit)
     return (
         "(async () => {\n"
         "let __result;\n"
         "let __error = null;\n"
-        "try {\n"
+        + pin
+        + "try {\n"
         + user_code + "\n"
         "} catch(e) {\n"
         "    __error = {\n"
@@ -158,6 +317,7 @@ def _build_uxp_wrapper(user_code: str) -> str:
         "        line: typeof e.line === 'number' ? e.line : -1\n"
         "    };\n"
         "}\n"
+        "try { __mcpCloseUnexpected(); } catch (__mcpCe) {}\n"
         "try {\n"
         "    let indApp = (typeof app !== 'undefined' && app) ? app : (typeof require !== 'undefined' ? require('indesign').app : null);\n"
         "    if (indApp) {\n"
@@ -166,10 +326,16 @@ def _build_uxp_wrapper(user_code: str) -> str:
         "            error: __error.message,\n"
         "            name: __error.name,\n"
         "            stack: __error.stack,\n"
-        "            line: __error.line\n"
+        "            line: __error.line,\n"
+        "            closed_unexpected_documents: __mcpClosedForeign,\n"
+        "            unexpected_documents: __mcpUnexpected,\n"
+        "            warning: __mcpWarning()\n"
         "        } : {\n"
         "            success: true,\n"
-        "            result: typeof __result !== 'undefined' ? __result : null\n"
+        "            result: typeof __result !== 'undefined' ? __result : null,\n"
+        "            closed_unexpected_documents: __mcpClosedForeign,\n"
+        "            unexpected_documents: __mcpUnexpected,\n"
+        "            warning: __mcpWarning()\n"
         "        });\n"
         f"        indApp.insertLabel('{_UXP_LABEL_KEY}', payload);\n"
         "    }\n"
@@ -178,16 +344,26 @@ def _build_uxp_wrapper(user_code: str) -> str:
     )
 
 
-# Simple expression evaluator (no undo, no full wrapper)
+# Simple expression evaluator (no undo, no full wrapper).
+# If foreign docs appeared, append "\n[MCP WARNING] " + warning text.
 _JSX_EVAL_TEMPLATE = (
     "(function() {\n"
+    "$PIN$"
+    "    function __mcpEvalOut(val) {\n"
+    "        var s = String(val);\n"
+    "        var w = __mcpWarning();\n"
+    "        if (w) s += \"\\n[MCP WARNING] \" + w;\n"
+    "        return s;\n"
+    "    }\n"
     "    try {\n"
     "        var __r = $EXPRESSION$;\n"
-    "        if (typeof __r === 'undefined') return 'undefined';\n"
-    "        if (__r === null) return 'null';\n"
-    "        return String(__r);\n"
+    "        __mcpCloseUnexpected();\n"
+    "        if (typeof __r === 'undefined') return __mcpEvalOut('undefined');\n"
+    "        if (__r === null) return __mcpEvalOut('null');\n"
+    "        return __mcpEvalOut(__r);\n"
     "    } catch(e) {\n"
-    "        return 'ERROR: ' + (e.message || String(e));\n"
+    "        try { __mcpCloseUnexpected(); } catch(x) {}\n"
+    "        return __mcpEvalOut('ERROR: ' + (e.message || String(e)));\n"
     "    }\n"
     "})();\n"
 )
@@ -274,6 +450,7 @@ def run_jsx(
     undo_mode: str = "entire",
     timeout: int | None = None,
     language: str = "javascript",
+    close_unexpected_documents: bool = True,
 ) -> dict:
     """Execute JSX (ExtendScript) or UXP code in InDesign with safety wrapping.
 
@@ -285,16 +462,24 @@ def run_jsx(
                    ``"none"`` skips undo tracking (for read-only operations).
         timeout: Currently unused (reserved for future threading-based timeout).
         language: ``"javascript"`` (default, ExtendScript ES3) or ``"uxp"`` (modern ES6+ / V8).
+        close_unexpected_documents: When True (default), close foreign documents
+            that appeared mid-script only if they are saved and unmodified.
+            Modified or untitled foreign docs stay open. Always reports
+            ``unexpected_documents`` / ``warning`` when any foreign doc appeared.
+            Set False when the script intentionally opens another file that must
+            remain open (detection/warning still run).
 
     Returns:
         dict with ``success`` key. On success: ``{success: True, result: ...}``.
         On error: ``{success: False, error: str, name: str, line: int}``.
+        May include ``closed_unexpected_documents``, ``unexpected_documents``,
+        ``warning``.
     """
     app = connect()
 
     lang_lower = language.lower().strip()
     if lang_lower in ("uxp", "uxpscript"):
-        wrapped = _build_uxp_wrapper(code)
+        wrapped = _build_uxp_wrapper(code, close_unexpected_documents=close_unexpected_documents)
         if undo_mode == "entire":
             return _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
         elif undo_mode == "auto":
@@ -303,7 +488,7 @@ def run_jsx(
             return _execute_uxp(app, wrapped)
 
     # Default: ExtendScript (ES3)
-    wrapped = _build_wrapper(code)
+    wrapped = _build_wrapper(code, close_unexpected_documents=close_unexpected_documents)
 
     if undo_mode == "entire":
         return _execute_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
@@ -314,14 +499,26 @@ def run_jsx(
         return _execute(app, wrapped)
 
 
-def eval_expr(expression: str, timeout: int | None = None) -> str:
+def eval_expr(
+    expression: str,
+    timeout: int | None = None,
+    close_unexpected_documents: bool = True,
+) -> str:
     """Evaluate a simple expression in InDesign.
 
     Returns the result as a string. No undo wrapping.
     For quick read-only queries (e.g. ``app.activeDocument.pages.length``).
+    When ``close_unexpected_documents`` is True (default), foreign documents
+    opened as a side effect of the expression are closed without saving.
     """
     app = connect()
-    jsx = _JSX_EVAL_TEMPLATE.replace("$EXPRESSION$", expression)
+    close_lit = "true" if close_unexpected_documents else "false"
+    pin = _DOC_PIN_HELPER_ES.replace("$CLOSE_UNEXPECTED$", close_lit)
+    jsx = (
+        _JSX_EVAL_TEMPLATE
+        .replace("$PIN$", pin)
+        .replace("$EXPRESSION$", expression)
+    )
     return _execute_raw(app, jsx)
 
 

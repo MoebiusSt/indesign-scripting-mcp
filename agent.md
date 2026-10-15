@@ -142,6 +142,25 @@ python manage.py validate --expect-sources dom,javascript,scriptui
 - `README.md`: user-facing setup and usage
 - `THIRD_PARTY_NOTICES.md`: attribution and licensing notes
 
+## Agent must-know: toxic null hyperlinks
+
+If an agent enumerates `doc.hyperlinks` and reads `.destination`, a **copied**
+hyperlink with a missing destination (UI red flag, API `null`) may **open the
+document it was pasted from** and switch `activeDocument`. This is not
+`HyperlinkExternalPageDestination`. `run_jsx` / `eval_expression` detect
+documents that appear during a script. Saved, unmodified ones are closed
+(`close_unexpected_documents=true`, default). Modified or untitled ones stay
+open. Whenever any appeared, the result has a `warning`: treat it as a stop
+sign and verify the host before the next edit. Gotcha:
+`toxic-null-hyperlink-opens-origin-document`. Scan/repair via the installed core
+(load every `run_jsx` call — globals do not persist):
+
+```js
+$.evalFile(File(Folder.userData +
+    "/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc"));
+__result = $.global.THL.scan(app.documents.itemByName("file.indd"));
+```
+
 ## Preserved Design Rationale (No external plan files required)
 
 - The original project goal was version-agnostic OMV ingestion, so rebuild/update always starts from XML input and not from manual schema edits.

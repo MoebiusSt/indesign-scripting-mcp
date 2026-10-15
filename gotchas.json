@@ -712,6 +712,242 @@
       "solution": "Do not rely on macrotask timers (`setTimeout`/`setInterval`) or `fetch()` inside InDesign UXP scripts. Use synchronous/microtask async code (`Promise.resolve`, `Promise.all`, async computation). Perform timers and HTTP requests in the external agent/Python layer.",
       "added": "2026-09-10",
       "source": "curated"
+    },
+    {
+      "id": "modal-dialog-blocks-com-doscript",
+      "category": "execution",
+      "severity": "blocker",
+      "triggers": [
+        "modal dialog",
+        "modales Dialogfeld",
+        "COM/DoScript",
+        "COMError",
+        "Abweichung von Profil oder Richtlinie",
+        "dialog hidden",
+        "dialog behind",
+        "blocked"
+      ],
+      "problem": "run_jsx fails with 'Die Anforderung kann nicht bearbeitet werden, da ein modales Dialogfeld oder eine modale Warnmeldung aktiv ist' (COMError from COM/DoScript) while a native InDesign dialog is open, for example a profile/policy mismatch, a multi-document open progress window, or a ScriptUI report. The dialog is often hidden behind other windows.",
+      "solution": "Do not retry run_jsx until the modal is dismissed. Identify the blocker by enumerating visible top-level window titles owned by the InDesign process, bring that window forward, dismiss it, then re-run run_jsx. app.activate() can surface InDesign but does not close the dialog. Dismiss via UI automation only with user consent.",
+      "added": "2026-10-09",
+      "source": "auto-submission"
+    },
+    {
+      "id": "color-profile-mismatch-blocks-batch-open",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "color profile mismatch",
+        "Abweichung von Profil oder Richtlinie",
+        "open many documents",
+        "batch open",
+        "Dokument nicht ändern",
+        "mismatchAskWhenOpening"
+      ],
+      "problem": "Opening many documents shows one 'Abweichung von Profil oder Richtlinie' dialog per document whose embedded profile does not match the working space. Each dialog blocks all COM scripting until it is answered.",
+      "solution": "When the agent opens the files, set app.colorSettings.mismatchAskWhenOpening = false before the batch and restore the previous value afterwards. If the dialogs are already open, 'Dokument nicht ändern' is the default selection, so confirming OK applies that choice. Dismiss each dialog before the next run_jsx call.",
+      "example_good": "var prev = app.colorSettings.mismatchAskWhenOpening;\napp.colorSettings.mismatchAskWhenOpening = false;\n// open documents here\napp.colorSettings.mismatchAskWhenOpening = prev;",
+      "added": "2026-10-09",
+      "source": "auto-submission"
+    },
+    {
+      "id": "idletask-stalls-while-background",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "IdleTask",
+        "idleTasks",
+        "onIdle",
+        "background",
+        "not firing",
+        "startup script",
+        "watchdog",
+        "targetengine"
+      ],
+      "problem": "IdleTasks, including ones scheduled by a startup-script afterOpen handler, may not fire while InDesign is in the background. Their sleep stays at the scheduled value, so dependent logic such as pending counters and reports stalls.",
+      "solution": "When verifying idle-task-driven scripts, read app.idleTasks.everyItem().name and app.idleTasks.everyItem().sleep, then bring InDesign to the foreground with app.activate(). Pending tasks then fire within seconds. A missing report is not evidence of zero findings while app.idleTasks.length is still greater than zero.",
+      "added": "2026-10-09",
+      "source": "auto-submission"
+    },
+    {
+      "id": "collapsed-text-zero-width-lines",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "text disappeared",
+        "empty frames",
+        "collapsed text",
+        "zero width lines",
+        "crash recovery",
+        "Seitenfraß",
+        "snippet repair",
+        "INDESIGN_SNIPPET",
+        "Hyperlink.source"
+      ],
+      "problem": "Collapsed text after crash recovery during a simultaneous PDF export: frames, matrices, and story text are intact, and an IDML export of the text matches, but every line has zero width, all glyphs sit on one point, and baselines fall outside the frame, so pages look empty. recompose(), ignoreWrap, duplicate(), and nudging the frame leave it broken; a nudge can push the text into overset.",
+      "solution": "The damage sits in the binary composition cache of the .indd. Detect a line when the distance between its first and last character in x and y is below 0.01 (sqrt(dx*dx+dy*dy)); an x-only test false-positives on 90-degree rotated frames. Export the affected top-level object with exportFile(ExportFormat.INDESIGN_SNIPPET, file), place it with spread.place(file, [bounds[1], bounds[0]], layer) so the point is [left, top], then call bringToFront(oldItem) on the placed item (reference must share the parent). Rethread partial story chains and point each existing Hyperlink.source at the orphan source the snippet created: snippets carry sources and do not carry hyperlinks. Remove the old object. A full IDML round trip also clears the cache and can rebreak unrelated paragraphs.",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "invisible-document-open-hangs",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "app.open hidden",
+        "invisible document",
+        "hang",
+        "not responding",
+        "timeout",
+        "long running script",
+        "close documents"
+      ],
+      "problem": "Heavy DOM work on a document opened with app.open(file, false) (showingWindow false) can hang InDesign with no dialog and flat CPU. The same code on the same file opened in a window finishes. A long run_jsx call can also exceed the bridge timeout while InDesign keeps running.",
+      "solution": "Open repair documents with a window: app.open(file, true). Suppress dialogs via app.scriptPreferences.userInteractionLevel = UserInteractionLevels.NEVER_INTERACT and restore the previous value afterwards. For long jobs, open the progress log, writeln one step, and close it each time; a File left open flushes on close. Close only the documents the script opened.",
+      "example_good": "var prev = app.scriptPreferences.userInteractionLevel;\napp.scriptPreferences.userInteractionLevel = UserInteractionLevels.NEVER_INTERACT;\nvar doc = app.open(File(path), true);\napp.scriptPreferences.userInteractionLevel = prev;",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "ufeff-string-literal-empty-via-doscript",
+      "category": "extendscript",
+      "severity": "blocker",
+      "triggers": [
+        "FEFF",
+        "zero width no-break space",
+        "BOM",
+        "PDF comments anchor",
+        "string literal",
+        "guard mismatch",
+        "split"
+      ],
+      "problem": "In JSX sent through run_jsx/DoScript, a string literal containing U+FEFF (the \\uFEFF escape or the character itself) evaluates to an empty string. Comparisons, indexOf, and split against story text that contains U+FEFF PDF-comment anchors then fail, and split on that empty string splits every character.",
+      "solution": "Build the character at runtime with String.fromCharCode(0xFEFF). In generated data, store a placeholder such as \\u0001 and replace that placeholder with the runtime character before comparing.",
+      "example_bad": "var parts = text.split(\"\\uFEFF\");",
+      "example_good": "var FEFF = String.fromCharCode(0xFEFF);\nvar parts = text.split(FEFF);",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "active-document-switches-during-agent-run",
+      "category": "execution",
+      "severity": "blocker",
+      "triggers": [
+        "activeDocument",
+        "multiple documents",
+        "undo",
+        "parallel user work",
+        "wrong document",
+        "hyperlink.destination"
+      ],
+      "problem": "While the user keeps working in InDesign, app.activeDocument can change to another open document between run_jsx calls. Reading toxic null hyperlink.destination can also open a foreign document mid-script and switch activeDocument. The undo tool calls undo() on app.activeDocument only, so it can report steps_undone 0 or undo the wrong file.",
+      "solution": "In every run_jsx, address the target with app.documents.itemByName(\"file.indd\") or by full path. Roll back with that document's undo(), or with an explicit inverse edit, while another document may be active. Leave close_unexpected_documents at its default (true). It only closes foreign documents that are saved and unmodified; modified or untitled ones stay open and the result carries a `warning`. When a result has a `warning`, stop and verify the host before the next edit. See also toxic-null-hyperlink-opens-origin-document.",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "contents-replace-keeps-style-runs",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "replace text",
+        "contents =",
+        "formatting leak",
+        "italic",
+        "character style",
+        "fontStyleName"
+      ],
+      "problem": "Assigning characters.itemByRange(a, b).contents keeps the original per-position style runs, so italic or colored words land on unrelated characters of the new string. Inserted text can also inherit local font overrides from the following paragraph.",
+      "solution": "After the replace, call applyCharacterStyle(style) with the character style of the first original character. The method takes only the style. Clear leftover local formatting with clearOverrides(OverrideType.CHARACTER_ONLY), then re-apply intended emphasis. Verify with textStyleRanges.everyItem().getElements(). The style name on a font is Font.fontStyleName.",
+      "example_good": "range.contents = newText;\nrange.applyCharacterStyle(baseStyle);\nrange.clearOverrides(OverrideType.CHARACTER_ONLY);",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "nulled-master-instance-replace-spread",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "master items invisible",
+        "Musterseitenelemente",
+        "footer missing",
+        "Pagina fehlt",
+        "remove local overrides greyed",
+        "masterPageItems",
+        "override",
+        "nulled master instance",
+        "replace spread"
+      ],
+      "problem": "After a corruption crash, master items are invisible on specific pages while appliedMaster and masterPageItems look complete, spread.showMasterItems is true, the master page transform is identity, and the IDML OverrideList is empty. Remove all local overrides stays greyed out. Re-applying the master, nudging the master item, and moving the spread leave the pages blank. masterItem.override(page) returns a local copy with zero-area geometricBounds at the spread center.",
+      "solution": "The per-page master instance is broken and travels with the Page. Replace the spread: add a spread after the old one, copy allowPageShuffle and showMasterItems from the old spread, set appliedMaster on each new page, move old.pageItems from back to front onto the new spread, retarget HyperlinkPageDestination.destinationPage, remove the old spread, and recreate any section that started on a removed page with the same properties. Verify page names, counts, and stacking within 0.05 mm. To scan, call override(page) and read bounds inside doScript(UndoModes.ENTIRE_SCRIPT), then undo. Skip Guides: masterPageItems includes them, and Guide has no geometricBounds.",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "pageitems-order-is-not-stacking-order",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "stacking order",
+        "z-order",
+        "Stapelreihenfolge",
+        "pageItems order",
+        "bringToFront",
+        "move to spread",
+        "allPageItems",
+        "verdeckt"
+      ],
+      "problem": "spread.pageItems, page.pageItems, and everyItem().getElements() are grouped by object type (rectangles, graphic lines, polygons, text frames, groups). PageItem.index is the index within that type. Moving items to another spread in that order re-stacks each layer by type, so a background rectangle can land in front of its text frame. Comparing pageItems order before and after does not show the change.",
+      "solution": "Read z-order from spread.allPageItems filtered to items whose parent is that spread. The list is front to back, layer by layer. Enforce it by iterating from the back and calling item.bringToFront() with no reference; the call stays on the item's layer. bringToFront(reference) requires the same parent. Verify with the allPageItems id sequence. If allPageItems throws on corrupted items, this read is unavailable.",
+      "example_good": "var z = [];\nvar all = spread.allPageItems;\nfor (var i = 0; i < all.length; i++) {\n    if (all[i].parent === spread) z.push(all[i]);\n}\nfor (var j = z.length - 1; j >= 0; j--) z[j].bringToFront();",
+      "added": "2026-10-15",
+      "source": "auto-submission"
+    },
+    {
+      "id": "toxic-null-hyperlink-opens-origin-document",
+      "category": "dom",
+      "severity": "blocker",
+      "triggers": [
+        "hyperlink.destination",
+        "null destination",
+        "showDestination",
+        "copied hyperlink",
+        "opens other document",
+        "activeDocument switches",
+        "HyperlinkTextSource",
+        "missing destination",
+        "cross-document provenance",
+        "Ctrl+Shift+3",
+        "toxicHyperlinks.jsxinc",
+        "THL.scan",
+        "hyperlink scan",
+        "closed_unexpected_documents"
+      ],
+      "problem": "Copied Hyperlink objects can retain a hidden cross-document provenance after their destination becomes missing (API: hyperlink.destination === null; UI red flag). Reading .destination or calling showDestination() then opens the origin document and may switch activeDocument. This is not HyperlinkExternalPageDestination. Fresh hyperlinks created with hyperlinks.add(source) and no destination are clean nulls and do not open another file. Assigning NothingEnum.NOTHING to destination throws.",
+      "solution": "Never read `.destination` in a loop without protection. Use the shared core: `$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\")); THL.scan(doc)` (read-only, undo_mode none) and `THL.sanitize(doc, ids, \"clean-null\")` (one undo step) to rebuild toxic links as clean nulls. The core pins open documents by id, closes only foreign documents that appeared during a probe and are unmodified, suppresses open dialogs and re-activates the host. If you must write your own loop: snapshot document ids before the read, close only new unmodified ones, and address the host by name/id afterwards, never by activeDocument. Repair = remove hyperlink + source, recreate with hyperlinks.add(source) (clean null) or add(source, knownDest) when the real target is known from a side channel. Never invent a URL from link text. Assigning NothingEnum.NOTHING to destination throws. Limitation: if the origin document is already open, probing opens nothing and the link looks like a clean null (THL reports it in nullOnly). run_jsx closes saved, unmodified foreign documents after the script and returns a `warning` when any foreign document appeared.",
+      "example_bad": "for (var i = 0; i < doc.hyperlinks.length; i++) {\n  var d = doc.hyperlinks[i].destination; // may open origin .indd\n}",
+      "example_good": "$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\nvar doc = app.documents.itemByName(\"ZF_2026-06.indd\");\n__result = $.global.THL.scan(doc);",
+      "added": "2026-10-16",
+      "source": "auto-submission"
+    },
+    {
+      "id": "jsx-globals-not-persistent-between-calls",
+      "category": "execution",
+      "severity": "warning",
+      "triggers": [
+        "$.global",
+        "evalFile",
+        "#include",
+        "library",
+        "persist",
+        "between calls",
+        "undefined is not an object"
+      ],
+      "problem": "Each run_jsx call runs in a fresh script engine. Globals, $.global members and libraries loaded with $.evalFile in one call do not exist in the next call. Symptom: 'undefined is not an object' when calling a library function loaded earlier.",
+      "solution": "Load libraries with $.evalFile(File(absolutePath)) at the top of every run_jsx call that uses them. Pass state between calls as returned data (__result) or document labels, not as globals.",
+      "example_good": "$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\n__result = $.global.THL.scan(app.documents.itemByName(\"X.indd\"));",
+      "added": "2026-10-16",
+      "source": "review"
     }
   ]
 }

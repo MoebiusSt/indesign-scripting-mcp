@@ -118,6 +118,15 @@ mcp = FastMCP(
         "  Guides:       page.guides.add(), guide.orientation, guide.location\n"
         "  Hyperlinks:   doc.hyperlinks, doc.hyperlinkTextSources, doc.hyperlinkURLDestinations\n"
         "For a comprehensive cheatsheet with examples, call the get_quick_reference tool.\n\n"
+        "TOXIC NULL HYPERLINKS (blocker):\n"
+        "  Copied hyperlinks with destination===null can OPEN the origin .indd when .destination\n"
+        "  is read (or showDestination). run_jsx / eval_expression detect documents that appear during\n"
+        "  a script. Saved, unmodified ones are closed (close_unexpected_documents=true, default).\n"
+        "  Modified or untitled ones stay open. Whenever any appeared, the result has a warning:\n"
+        "  treat it as a stop sign and verify the host before the next edit. Never trust\n"
+        "  activeDocument after hyperlink scans — re-address the host by name/id. Scan/repair via\n"
+        "  $.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\n"
+        "  then THL.scan(doc) / THL.sanitize(...). Gotcha: toxic-null-hyperlink-opens-origin-document.\n\n"
         "LEARNING FEEDBACK LOOP:\n"
         "  - Use report_learning(...) to submit newly discovered bugs, gotchas, and best practices.\n"
         "  - Use get_gotchas(context?) to retrieve curated gotchas before writing complex scripts.\n"
@@ -126,7 +135,9 @@ mcp = FastMCP(
         "  - MUST run get_gotchas(context) before implementing a non-trivial InDesign task.\n"
         "  - SHOULD call get_quick_reference() once at the start of the first InDesign task in a conversation.\n"
         "  - MUST use report_learning(...) after a user-reported error/gotcha was resolved and the root cause is clear.\n"
-        "  - SHOULD avoid duplicate reports by checking if an equivalent gotcha already exists."
+        "  - SHOULD avoid duplicate reports by checking if an equivalent gotcha already exists.\n"
+        "  - MUST treat activeDocument as unstable after any hyperlink.destination / showDestination access.\n"
+        "  - MUST leave close_unexpected_documents=true unless intentionally opening another document."
     ),
 )
 
@@ -200,6 +211,9 @@ Note: Standalone InDesign scripts via COM do not pump background socket loops fo
 - **MUST** classify labels by lifecycle: `_tmp_` for temporary intra-task state, `agentContext_` for intentional cross-session facts.
 - **MUST** clear temporary labels at task end with `insertLabel(key, "")`.
 - **SHOULD** maintain `_agentLabelRegistry` listing active persistent keys for document auditability.
+- **MUST** treat `app.activeDocument` as unstable after any `hyperlink.destination` / `showDestination` access.
+- **MUST** leave `close_unexpected_documents=true` (default). It only closes saved unmodified foreign docs; a `warning` means stop and verify the host.
+- **MUST** load `toxicHyperlinks.jsxinc` with `$.evalFile` in every `run_jsx` that uses `THL.*` (globals do not persist between calls).
 
 Maintainer promotion command:
 `python manage.py review-submissions`
@@ -397,11 +411,19 @@ def _unwrap_result(result: dict) -> dict:
 
     When __result is a dict, its keys are merged into the top-level response
     for a cleaner tool output.  Other result types are left as-is.
+    Preserves document-pinning fields from the wrapper envelope (success and error).
     """
+    out: dict
     if result.get("success") and isinstance(result.get("result"), dict):
         data = result["result"]
-        return {"success": True, **data}
-    return result
+        out = {"success": True, **data}
+    else:
+        out = dict(result)
+    for key in ("closed_unexpected_documents", "unexpected_documents", "warning"):
+        val = result.get(key)
+        if val:
+            out[key] = val
+    return out
 
 
 def _utc_now_iso() -> str:
@@ -460,6 +482,7 @@ def run_jsx(
     undo_name: str = "Agent Script",
     undo_mode: str = "entire",
     language: str = "javascript",
+    close_unexpected_documents: bool = True,
 ) -> str:
     """Execute ExtendScript (JSX) or UXP JavaScript code in InDesign.
 
@@ -496,6 +519,14 @@ def run_jsx(
         for (var i = 0; i < doc.textFrames.length; i++) { doc.textFrames[i].label = "processed"; }
     Only use loops when each element needs a DIFFERENT value.
 
+    DOCUMENT PINNING:
+      Detects documents that appear during a script (by document id). Saved, unmodified
+      foreign docs are closed when close_unexpected_documents=true (default); modified or
+      untitled ones stay open. Whenever any foreign doc appeared, the result has warning
+      and unexpected_documents (plus closed_unexpected_documents for closed paths). Treat
+      warning as a stop sign and verify the host before the next edit. Set false only when
+      the script intentionally opens another file that must remain open (detection still runs).
+
     Args:
         code: The script code to execute. Assign to __result to return data.
         undo_name: Human-readable label for Edit > Undo (e.g. "Agent: Format headings")
@@ -503,13 +534,20 @@ def run_jsx(
                    "auto" lets InDesign handle undo per-operation,
                    "none" skips undo tracking (for read-only operations)
         language: "javascript" for ExtendScript ES3 (default) or "uxp" for modern JS (ES6+/V8)
+        close_unexpected_documents: Close foreign docs opened mid-script (default True)
     """
     err = _check_connection()
     if err:
         return _fmt({"success": False, "error": err})
 
     try:
-        result = com.run_jsx(code, undo_name=undo_name, undo_mode=undo_mode, language=language)
+        result = com.run_jsx(
+            code,
+            undo_name=undo_name,
+            undo_mode=undo_mode,
+            language=language,
+            close_unexpected_documents=close_unexpected_documents,
+        )
         return _fmt(result)
     except Exception as e:
         return _fmt({"success": False, "error": str(e), "name": type(e).__name__})
@@ -719,7 +757,10 @@ def get_selection(detail_level: str = "basic") -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def eval_expression(expression: str) -> str:
+def eval_expression(
+    expression: str,
+    close_unexpected_documents: bool = True,
+) -> str:
     """Evaluate a short ExtendScript expression in InDesign and return the result.
 
     Use this for quick read-only queries like checking a property value
@@ -727,16 +768,30 @@ def eval_expression(expression: str) -> str:
 
     Args:
         expression: The expression to evaluate (e.g. "app.activeDocument.pages.length")
+        close_unexpected_documents: Close foreign docs opened as a side effect
+            (default True). Keep True when probing hyperlink.destination.
     """
     err = _check_connection()
     if err:
         return _fmt({"success": False, "error": err})
 
     try:
-        result = com.eval_expr(expression)
+        result = com.eval_expr(
+            expression,
+            close_unexpected_documents=close_unexpected_documents,
+        )
+        warning = None
+        if isinstance(result, str) and "\n[MCP WARNING] " in result:
+            result, warning = result.split("\n[MCP WARNING] ", 1)
         if isinstance(result, str) and result.startswith("ERROR: "):
-            return _fmt({"success": False, "error": result[7:]})
-        return _fmt({"success": True, "result": result})
+            payload = {"success": False, "error": result[7:]}
+            if warning:
+                payload["warning"] = warning
+            return _fmt(payload)
+        payload = {"success": True, "result": result}
+        if warning:
+            payload["warning"] = warning
+        return _fmt(payload)
     except Exception as e:
         return _fmt({"success": False, "error": str(e)})
 
@@ -1218,6 +1273,14 @@ _QUICK_REFERENCE = """\
   doc.hyperlinks                            All hyperlinks
   doc.hyperlinkTextSources                  Text-based link sources
   doc.hyperlinkURLDestinations              URL destinations
+  // BLOCKER: copied hyperlinks with destination===null can OPEN the origin .indd
+  // when .destination is read (or showDestination). Not HyperlinkExternalPageDestination.
+  // run_jsx / eval_expression detect docs that appear mid-script. Saved unmodified ones
+  // are closed (close_unexpected_documents=true); modified/untitled stay open. A warning
+  // means stop and verify the host. Scan/repair:
+  //   $.evalFile(File(Folder.userData + "/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc"));
+  //   THL.scan(doc);  THL.sanitize(doc, ids, "clean-null");
+  // Gotcha: toxic-null-hyperlink-opens-origin-document
 
 ## Preferences
   doc.viewPreferences                       Measurement units, rulers, guides display
@@ -1247,6 +1310,7 @@ _QUICK_REFERENCE = """\
   - try/catch around .parentPage (null for items on pasteboard)
   - Assign to __result (no return statement in run_jsx)
   - Use everyItem() for bulk ops (see Collection Patterns in server instructions)
+  - Toxic null hyperlinks: reading .destination may open another .indd; treat warning as stop
 
 ## UXP Scripting Reference (language='uxp')
   // Use language='uxp' in run_jsx when ES6+ / V8 features are specifically beneficial.
