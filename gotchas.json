@@ -924,7 +924,7 @@
         "closed_unexpected_documents"
       ],
       "problem": "Copied Hyperlink objects can retain a hidden cross-document provenance after their destination becomes missing (API: hyperlink.destination === null; UI red flag). Reading .destination or calling showDestination() then opens the origin document and may switch activeDocument. This is not HyperlinkExternalPageDestination. Fresh hyperlinks created with hyperlinks.add(source) and no destination are clean nulls and do not open another file. Assigning NothingEnum.NOTHING to destination throws.",
-      "solution": "Never read `.destination` in a loop without protection. Use the shared core: `$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\")); THL.scan(doc)` (read-only, undo_mode none) and `THL.sanitize(doc, ids, \"clean-null\")` (one undo step) to rebuild toxic links as clean nulls. The core pins open documents by id, closes only foreign documents that appeared during a probe and are unmodified, suppresses open dialogs and re-activates the host. If you must write your own loop: snapshot document ids before the read, close only new unmodified ones, and address the host by name/id afterwards, never by activeDocument. Repair = remove hyperlink + source, recreate with hyperlinks.add(source) (clean null) or add(source, knownDest) when the real target is known from a side channel. Never invent a URL from link text. Assigning NothingEnum.NOTHING to destination throws. Limitation: if the origin document is already open, probing opens nothing and the link looks like a clean null (THL reports it in nullOnly). run_jsx closes saved, unmodified foreign documents after the script and returns a `warning` when any foreign document appeared.",
+      "solution": "Never read `.destination` in a loop without protection. Use the shared core: `$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\")); THL.scan(doc)` (read-only, undo_mode none) and `THL.sanitize(doc, ids, \"clean-null\")` (one undo step) to rebuild toxic links as clean nulls. The core pins open documents by id, closes only foreign documents that appeared during a probe and are unmodified, suppresses open dialogs and re-activates the host. If you must write your own loop: snapshot document ids before the read, close only new unmodified ones, and address the host by name/id afterwards, never by activeDocument. Repair = remove hyperlink + source, recreate with hyperlinks.add(source) (clean null) or add(source, knownDest) when the real target is known from a side channel. Never invent a URL from link text. Assigning NothingEnum.NOTHING to destination throws. Limitation: if the origin document is already open, probing opens nothing and the link looks like a clean null (THL reports it in nullOnly). run_jsx closes saved, unmodified foreign documents after the script and returns a `warning` when any foreign document appeared. Related: orphan sources (see orphan-hyperlink-source-blocks-new-hyperlink).",
       "example_bad": "for (var i = 0; i < doc.hyperlinks.length; i++) {\n  var d = doc.hyperlinks[i].destination; // may open origin .indd\n}",
       "example_good": "$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\nvar doc = app.documents.itemByName(\"ZF_2026-06.indd\");\n__result = $.global.THL.scan(doc);",
       "added": "2026-10-16",
@@ -948,6 +948,27 @@
       "example_good": "$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\n__result = $.global.THL.scan(app.documents.itemByName(\"X.indd\"));",
       "added": "2026-10-16",
       "source": "review"
+    },
+    {
+      "id": "orphan-hyperlink-source-blocks-new-hyperlink",
+      "category": "dom",
+      "severity": "warning",
+      "triggers": [
+        "New hyperlink greyed out",
+        "cannot create hyperlink",
+        "HyperlinkPageItemSource",
+        "orphan source",
+        "source already in use",
+        "group hyperlink",
+        "Stempel",
+        "snippet hyperlink",
+        "hyperlinkPageItemSources.add"
+      ],
+      "problem": "An orphan hyperlink source (HyperlinkPageItemSource or HyperlinkTextSource that no Hyperlink uses) still occupies its frame/group/text. An object can be a source only once, so the Hyperlinks panel refuses 'New hyperlink' and hyperlinkPageItemSources.add(item) fails, although no link is visible. Typical origin: snippets/copies carry sources without their hyperlinks (seen 2026-10-16 on a 'Stempel' group, ZF_2026-06 p. 57).",
+      "solution": "Find orphans side-effect free (read hyperlink.source only, never .destination): THL.findOrphanSources(doc) from Scripts Panel\\_lib\\toxicHyperlinks.jsxinc (v2, load via $.evalFile per call). Remove with THL.removeOrphanSources(doc, srcIds) (one undo step, re-checks orphan status), then create source + hyperlink normally. Manual: build a set of hyperlinks[i].source ids, remove sources not in the set.",
+      "example_good": "$.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\nvar doc = app.documents.itemByName(\"ZF_2026-06.indd\");\n__result = $.global.THL.findOrphanSources(doc);",
+      "added": "2026-10-16",
+      "source": "auto-submission"
     }
   ]
 }

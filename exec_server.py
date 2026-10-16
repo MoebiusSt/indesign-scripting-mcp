@@ -126,7 +126,8 @@ mcp = FastMCP(
         "  treat it as a stop sign and verify the host before the next edit. Never trust\n"
         "  activeDocument after hyperlink scans — re-address the host by name/id. Scan/repair via\n"
         "  $.evalFile(File(Folder.userData + \"/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc\"));\n"
-        "  then THL.scan(doc) / THL.sanitize(...). Gotcha: toxic-null-hyperlink-opens-origin-document.\n\n"
+        "  then THL.scan(doc) / THL.sanitize(...). Gotcha: toxic-null-hyperlink-opens-origin-document.\n"
+        "  Orphan sources block \"New hyperlink\": THL.findOrphanSources(doc) / THL.removeOrphanSources(doc, ids).\n\n"
         "LEARNING FEEDBACK LOOP:\n"
         "  - Use report_learning(...) to submit newly discovered bugs, gotchas, and best practices.\n"
         "  - Use get_gotchas(context?) to retrieve curated gotchas before writing complex scripts.\n"
@@ -1280,6 +1281,7 @@ _QUICK_REFERENCE = """\
   // means stop and verify the host. Scan/repair:
   //   $.evalFile(File(Folder.userData + "/Adobe/InDesign/Version 21.0/de_DE/Scripts/Scripts Panel/_lib/toxicHyperlinks.jsxinc"));
   //   THL.scan(doc);  THL.sanitize(doc, ids, "clean-null");
+  // Orphan sources block "New hyperlink": THL.findOrphanSources(doc) / THL.removeOrphanSources(doc, ids)
   // Gotcha: toxic-null-hyperlink-opens-origin-document
 
 ## Preferences

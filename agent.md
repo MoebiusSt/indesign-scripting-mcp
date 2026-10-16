@@ -161,6 +161,8 @@ $.evalFile(File(Folder.userData +
 __result = $.global.THL.scan(app.documents.itemByName("file.indd"));
 ```
 
+Orphan sources block "New hyperlink": `THL.findOrphanSources(doc)` / `THL.removeOrphanSources(doc, ids)`.
+
 ## Preserved Design Rationale (No external plan files required)
 
 - The original project goal was version-agnostic OMV ingestion, so rebuild/update always starts from XML input and not from manual schema edits.
