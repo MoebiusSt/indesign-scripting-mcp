@@ -121,3 +121,20 @@ if (typeof JSON === 'undefined') { JSON = {}; }
 if (typeof JSON.stringify !== 'function') {
     JSON.stringify = __safeStringify;
 }
+
+// JSON.parse fallback (ExtendScript has no native JSON). The text is only
+// evaluated after the json2.js validation proved it contains nothing but JSON
+// tokens, so no code can run through it.
+if (typeof JSON.parse !== 'function') {
+    JSON.parse = function (text) {
+        var s = String(text);
+        var probe = s
+            .replace(/\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, '@')
+            .replace(/"[^"\\\n\r]*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?/g, ']')
+            .replace(/(?:^|:|,)(?:\s*\[)+/g, '');
+        if (/^[\],:{}\s]*$/.test(probe) && /\S/.test(s)) {
+            return eval('(' + s + ')');
+        }
+        throw new SyntaxError('JSON.parse: invalid JSON');
+    };
+}

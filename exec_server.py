@@ -23,7 +23,8 @@ Provides 11 tools for executing JSX code in Adobe InDesign via COM/OLE:
 
 Requires InDesign Desktop running on Windows.
 Uses UndoModes.ENTIRE_SCRIPT to group all operations per call.
-No eval() anywhere -- JSX code is inlined, results serialised via __safeStringify.
+User code is inlined, never run via eval(); results are serialised via __safeStringify.
+JSON.parse is available in ExtendScript through the polyfill (validated JSON only).
 """
 
 import json
@@ -297,7 +298,7 @@ This reviews entries in `submissions/pending.jsonl` and promotes accepted ones i
     // Persistent context state, keep only if future tasks need it
     doc.insertLabel("agentContext_layoutMap", JSON.stringify({sectionA: [1, 2, 3]}));
     var raw = doc.extractLabel("agentContext_layoutMap");
-    var map = raw ? eval("(" + raw + ")") : null;
+    var map = raw ? JSON.parse(raw) : null;
 
     // Optional registry for persistent keys
     var regKey = "_agentLabelRegistry";
@@ -402,6 +403,7 @@ each element needs a different value.**
    a stale specifier.
 
 ## Safety Notes
+- `JSON.stringify` / `JSON.parse` are available in ExtendScript (polyfill; `JSON.parse` accepts strict JSON only).
 - DOM objects in __result are serialised as specifier strings, not expanded.
 - Properties that crash InDesign (scriptPreferences.properties, shadow-settings
   in find/change prefs) are automatically skipped during serialisation.
