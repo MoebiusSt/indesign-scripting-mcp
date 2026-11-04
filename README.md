@@ -12,17 +12,30 @@
 
 ![Some chats with the InDesign agent](./docs/chat-example.svg)
 
-## What You Can Do
+## What can it do?
 
-Ask in plain language, for example:
+Simple jobs, sure: *"Run preflight and fix overset frames by adjusting word and letter spacing wiggle-room. Escalate difficult cases to me."*
+*"Correct all captions to sit over their images instead of under them. Write a new auto-sizing objectStyle for this."*
 
-- *"Apply the paragraph style 'Heading 2' to every line that starts with a number."*
-- *"List all fonts used in this issue and tell me which ones are missing."*
-- *"Run preflight and show me every overset text frame with its page."*
-- *"Place a caption under every image on pages 12–18."*
-- *"Undo what you just did."*
+But these are jobs it has actually done in production, on 80–100 page magazines:
 
-The agent looks up InDesign's scripting API, writes the script, runs it in your open document and checks the result. Every change is a single step in **Edit › Undo**.
+* **"Apply the comments from the editor's article proof-read PDFs to the open issue."**
+  It finds each passage, skips corrections already made and adds missing
+  photo credits. Then it checks its own work by exporting and looking at
+  the pages.
+* **"Check all hyphenations before print."** It sorts the problems
+  by severity, gives page, column and line for each, and finds the cause on ~2,000 hyphenations.
+* **"Set the event calendar data from the website export and build the additional tour date boxes from the editor's .docx and loosely distribute the boxes over the calendar data columns."**
+  Several hundred entries, house style, typo fixes, all in one undo step.
+* **"Replace the 18-page section from the old issue with the editor's new package."**
+  It relinks the files and keeps every other page's left/right position
+  correct.
+* **"Rebuild the table of contents after the page shifts from the new page plan."** Page numbers
+  and teaser texts, which it learned to take from the section markers and article headlines in this workflow. Run it again and nothing breaks.
+* **"Update the issue dates in all our media kits, German and English. Here are PDFs with annotations and corrections. Export new versioned PDFs."**
+
+Every job follows the same loop: inspect → look up the DOM → run in a named undo step
+→ verify → report. It never hides a problem.
 
 ## Built for Windows
 
