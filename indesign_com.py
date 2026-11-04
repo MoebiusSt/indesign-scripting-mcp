@@ -22,6 +22,7 @@ Safety patterns:
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -214,7 +215,115 @@ _DOC_PIN_HELPER_UXP = (
 )
 
 
-def _build_wrapper(user_code: str, close_unexpected_documents: bool = True) -> str:
+# Change tracking for the host document (the document active when the script
+# starts, addressed by id afterwards). Diffs allPageItems ids, page and story
+# counts; __mcpTrack(obj, note) lets user code record modified objects
+# explicitly. $TRACK$ -> true|false.
+_CHANGE_TRACK_HELPER_ES = (
+    "var __mcpTrackOn = $TRACK$;\n"
+    "var __mcpTracked = [];\n"
+    "var __mcpBefore = null;\n"
+    "var __mcpTrackLimit = 50;\n"
+    "var __mcpIdScanMax = 30000;\n"
+    "function __mcpDescribe(o) {\n"
+    "    var d = { id: null, type: '' };\n"
+    "    try { d.type = String(o.constructor.name); } catch (__mcpT0) {}\n"
+    "    try { d.id = o.id; } catch (__mcpT1) {}\n"
+    "    try { if (o.name) d.name = String(o.name); } catch (__mcpT2) {}\n"
+    "    try { if (o.label) d.label = String(o.label).substring(0, 60); } catch (__mcpT3) {}\n"
+    "    try { var __mcpPp = o.parentPage; if (__mcpPp) d.page = String(__mcpPp.name); } catch (__mcpT4) {}\n"
+    "    if (d.page === undefined) {\n"
+    "        try { var __mcpPf = o.parentTextFrames; if (__mcpPf && __mcpPf.length && __mcpPf[0].parentPage) d.page = String(__mcpPf[0].parentPage.name); } catch (__mcpT5) {}\n"
+    "    }\n"
+    "    return d;\n"
+    "}\n"
+    "function __mcpTrack(obj, note) {\n"
+    "    try {\n"
+    "        var __mcpRec = __mcpDescribe(obj);\n"
+    "        if (note) __mcpRec.note = String(note);\n"
+    "        __mcpTracked.push(__mcpRec);\n"
+    "    } catch (__mcpT6) {}\n"
+    "    return obj;\n"
+    "}\n"
+    "function __mcpHostDoc() {\n"
+    "    if (__mcpPinnedActiveId === null) return null;\n"
+    "    for (var __mcpHi = 0; __mcpHi < app.documents.length; __mcpHi++) {\n"
+    "        try { if (app.documents[__mcpHi].id === __mcpPinnedActiveId) return app.documents[__mcpHi]; } catch (__mcpHe) {}\n"
+    "    }\n"
+    "    return null;\n"
+    "}\n"
+    "function __mcpSnapshot(doc) {\n"
+    "    var s = { ids: null, pages: -1, stories: -1, modified: null };\n"
+    "    try { s.pages = doc.pages.length; } catch (__mcpS1) {}\n"
+    "    try { s.stories = doc.stories.length; } catch (__mcpS2) {}\n"
+    "    try { s.modified = !!doc.modified; } catch (__mcpS3) {}\n"
+    "    try {\n"
+    "        var __mcpApi = doc.allPageItems;\n"
+    "        if (__mcpApi.length <= __mcpIdScanMax) {\n"
+    "            s.ids = {};\n"
+    "            for (var __mcpSi = 0; __mcpSi < __mcpApi.length; __mcpSi++) s.ids[__mcpApi[__mcpSi].id] = __mcpApi[__mcpSi];\n"
+    "        }\n"
+    "    } catch (__mcpS4) { s.ids = null; }\n"
+    "    return s;\n"
+    "}\n"
+    "if (__mcpTrackOn) {\n"
+    "    try { var __mcpHd0 = __mcpHostDoc(); if (__mcpHd0) __mcpBefore = __mcpSnapshot(__mcpHd0); } catch (__mcpS5) {}\n"
+    "}\n"
+    "function __mcpChanges() {\n"
+    "    if (!__mcpTrackOn) return null;\n"
+    "    var c = { tracked: __mcpTracked.slice(0, __mcpTrackLimit), tracked_count: __mcpTracked.length };\n"
+    "    try {\n"
+    "        var doc = __mcpHostDoc();\n"
+    "        if (!doc) { c.host_document = null; return c; }\n"
+    "        c.host_document = { id: doc.id, name: '', path: '' };\n"
+    "        try { c.host_document.name = String(doc.name); } catch (__mcpC1) {}\n"
+    "        try { c.host_document.path = String(doc.fullName.fsName); } catch (__mcpC2) { c.host_document.path = '(unsaved)'; }\n"
+    "        if (!__mcpBefore) return c;\n"
+    "        var after = __mcpSnapshot(doc);\n"
+    "        c.pages_delta = after.pages - __mcpBefore.pages;\n"
+    "        c.stories_delta = after.stories - __mcpBefore.stories;\n"
+    "        c.modified_before = __mcpBefore.modified;\n"
+    "        c.modified_after = after.modified;\n"
+    "        if (__mcpBefore.ids && after.ids) {\n"
+    "            var added = [], removed = [], k;\n"
+    "            for (k in after.ids) if (!__mcpBefore.ids.hasOwnProperty(k)) added.push(k);\n"
+    "            for (k in __mcpBefore.ids) if (!after.ids.hasOwnProperty(k)) removed.push(k);\n"
+    "            c.added_count = added.length;\n"
+    "            c.removed_count = removed.length;\n"
+    "            c.added = [];\n"
+    "            for (k = 0; k < added.length && k < __mcpTrackLimit; k++) c.added.push(__mcpDescribe(after.ids[added[k]]));\n"
+    "            c.removed_ids = [];\n"
+    "            for (k = 0; k < removed.length && k < __mcpTrackLimit; k++) c.removed_ids.push(Number(removed[k]));\n"
+    "        } else {\n"
+    "            c.id_diff_skipped = 'more than ' + __mcpIdScanMax + ' page items';\n"
+    "        }\n"
+    "    } catch (__mcpC3) { c.error = String(__mcpC3.message || __mcpC3); }\n"
+    "    return c;\n"
+    "}\n"
+)
+
+_CHANGE_TRACK_HELPER_UXP = (
+    "let __mcpTracked = [];\n"
+    "function __mcpTrack(obj, note) {\n"
+    "    try {\n"
+    "        const d = { id: null, type: '' };\n"
+    "        try { d.type = String(obj.constructorName || obj.constructor.name); } catch (e0) {}\n"
+    "        try { d.id = obj.id; } catch (e1) {}\n"
+    "        try { if (obj.name) d.name = String(obj.name); } catch (e2) {}\n"
+    "        try { const pp = obj.parentPage; if (pp) d.page = String(pp.name); } catch (e3) {}\n"
+    "        if (note) d.note = String(note);\n"
+    "        __mcpTracked.push(d);\n"
+    "    } catch (e4) {}\n"
+    "    return obj;\n"
+    "}\n"
+    "function __mcpChanges() {\n"
+    "    return { tracked: __mcpTracked.slice(0, 50), tracked_count: __mcpTracked.length };\n"
+    "}\n"
+)
+
+
+def _build_wrapper(user_code: str, close_unexpected_documents: bool = True,
+                   track_changes: bool = False) -> tuple[str, int]:
     """Build the full JSX wrapper around user code.
 
     Architecture — **no eval()**:
@@ -232,61 +341,71 @@ def _build_wrapper(user_code: str, close_unexpected_documents: bool = True) -> s
 
         var doc = app.activeDocument;
         __result = {name: doc.name, pages: doc.pages.length};
+
+    Returns ``(script, line_offset)``; ``e.line - line_offset`` is the
+    1-based line within ``user_code``.
     """
     polyfill = _get_polyfill()
     close_lit = "true" if close_unexpected_documents else "false"
     pin = _DOC_PIN_HELPER_ES.replace("$CLOSE_UNEXPECTED$", close_lit)
+    track = _CHANGE_TRACK_HELPER_ES.replace("$TRACK$", "true" if track_changes else "false")
 
     # The IIFE ensures a clean scope and allows explicit ``return``.
     # DoScript returns the value of the last expression — the IIFE call.
-    return (
+    prefix = (
         polyfill + "\n"
         "(function() {\n"
         "var __result;\n"
         "var __uilevel = app.scriptPreferences.userInteractionLevel;\n"
         "app.scriptPreferences.userInteractionLevel = UserInteractionLevels.neverInteract;\n"
         + pin
+        + track
         + "try {\n"
+    )
+    envelope = (
+        ", closed_unexpected_documents: __mcpClosedForeign"
+        ", unexpected_documents: __mcpUnexpected"
+        ", warning: __mcpWarning()"
+        ", changes: __mcpChanges()"
+    )
+    script = (
+        prefix
         # === USER CODE (assigns to __result) ===
         + user_code + "\n"
         # === END USER CODE ===
         "__mcpCloseUnexpected();\n"
         "app.scriptPreferences.userInteractionLevel = __uilevel;\n"
         "if (typeof __result === 'undefined') {\n"
-        "    return __safeStringify({success: true, result: null"
-        ", closed_unexpected_documents: __mcpClosedForeign"
-        ", unexpected_documents: __mcpUnexpected"
-        ", warning: __mcpWarning()});\n"
+        "    return __safeStringify({success: true, result: null" + envelope + "});\n"
         "}\n"
         "try {\n"
-        "    return __safeStringify({success: true, result: __result"
-        ", closed_unexpected_documents: __mcpClosedForeign"
-        ", unexpected_documents: __mcpUnexpected"
-        ", warning: __mcpWarning()});\n"
+        "    return __safeStringify({success: true, result: __result" + envelope + "});\n"
         "} catch(jsonErr) {\n"
-        "    return __safeStringify({success: true, result: String(__result)"
-        ", closed_unexpected_documents: __mcpClosedForeign"
-        ", unexpected_documents: __mcpUnexpected"
-        ", warning: __mcpWarning()});\n"
+        "    return __safeStringify({success: true, result: String(__result)" + envelope + "});\n"
         "}\n"
         "} catch(e) {\n"
         "try { __mcpCloseUnexpected(); } catch(x2) {}\n"
         "try { app.scriptPreferences.userInteractionLevel = __uilevel; } catch(x) {}\n"
+        "var __mcpChg = null;\n"
+        "try { __mcpChg = __mcpChanges(); } catch(x3) {}\n"
         "return __safeStringify({\n"
         "    success: false,\n"
         "    error: e.message || String(e),\n"
         "    name: e.name || 'Error',\n"
         "    line: typeof e.line === 'number' ? e.line : -1,\n"
+        "    number: typeof e.number === 'number' ? e.number : null,\n"
         "    closed_unexpected_documents: __mcpClosedForeign,\n"
         "    unexpected_documents: __mcpUnexpected,\n"
-        "    warning: __mcpWarning()\n"
+        "    warning: __mcpWarning(),\n"
+        "    changes: __mcpChg\n"
         "});\n"
         "}\n"
         "})();\n"
     )
+    return script, prefix.count("\n")
 
 
-def _build_uxp_wrapper(user_code: str, close_unexpected_documents: bool = True) -> str:
+def _build_uxp_wrapper(user_code: str, close_unexpected_documents: bool = True) -> tuple[str, int]:
     """Build the full UXP wrapper around user code.
 
     Architecture for UXP Scripting (ES6+ / V8 engine):
@@ -299,15 +418,21 @@ def _build_uxp_wrapper(user_code: str, close_unexpected_documents: bool = True) 
     - Output is safely written to ``app.insertLabel('__mcp_uxp_result__', ...)``
       because COM DoScript does not return the last expression value for UXP scripts
     - Python polls the label via COM and clears it
+
+    Returns ``(script, line_offset)`` like :func:`_build_wrapper`.
     """
     close_lit = "true" if close_unexpected_documents else "false"
     pin = _DOC_PIN_HELPER_UXP.replace("$CLOSE_UNEXPECTED$", close_lit)
-    return (
+    prefix = (
         "(async () => {\n"
         "let __result;\n"
         "let __error = null;\n"
         + pin
+        + _CHANGE_TRACK_HELPER_UXP
         + "try {\n"
+    )
+    script = (
+        prefix
         + user_code + "\n"
         "} catch(e) {\n"
         "    __error = {\n"
@@ -329,19 +454,22 @@ def _build_uxp_wrapper(user_code: str, close_unexpected_documents: bool = True) 
         "            line: __error.line,\n"
         "            closed_unexpected_documents: __mcpClosedForeign,\n"
         "            unexpected_documents: __mcpUnexpected,\n"
-        "            warning: __mcpWarning()\n"
+        "            warning: __mcpWarning(),\n"
+        "            changes: __mcpChanges()\n"
         "        } : {\n"
         "            success: true,\n"
         "            result: typeof __result !== 'undefined' ? __result : null,\n"
         "            closed_unexpected_documents: __mcpClosedForeign,\n"
         "            unexpected_documents: __mcpUnexpected,\n"
-        "            warning: __mcpWarning()\n"
+        "            warning: __mcpWarning(),\n"
+        "            changes: __mcpChanges()\n"
         "        });\n"
         f"        indApp.insertLabel('{_UXP_LABEL_KEY}', payload);\n"
         "    }\n"
         "} catch(reportErr) {}\n"
         "})();\n"
     )
+    return script, prefix.count("\n")
 
 
 # Simple expression evaluator (no undo, no full wrapper).
@@ -451,6 +579,8 @@ def run_jsx(
     timeout: int | None = None,
     language: str = "javascript",
     close_unexpected_documents: bool = True,
+    track_changes: bool = False,
+    debug: bool = False,
 ) -> dict:
     """Execute JSX (ExtendScript) or UXP code in InDesign with safety wrapping.
 
@@ -468,35 +598,139 @@ def run_jsx(
             ``unexpected_documents`` / ``warning`` when any foreign doc appeared.
             Set False when the script intentionally opens another file that must
             remain open (detection/warning still run).
+        track_changes: ExtendScript only. Diff page item ids, page and story
+            counts of the host document before/after the script and return
+            them as ``changes``. Objects passed to ``__mcpTrack(obj, note)``
+            are listed in ``changes.tracked`` (both engines).
+        debug: Add ``context`` (source lines around the error) and, for UXP,
+            the full stack with frames mapped to user-code lines.
 
     Returns:
         dict with ``success`` key. On success: ``{success: True, result: ...}``.
-        On error: ``{success: False, error: str, name: str, line: int}``.
+        On error: ``{success: False, error: str, name: str, line: int}`` where
+        ``line`` is 1-based within ``code`` (``-1`` if unknown) and
+        ``source_line`` holds that line's text.
         May include ``closed_unexpected_documents``, ``unexpected_documents``,
-        ``warning``.
+        ``warning``, ``changes``.
     """
     app = connect()
 
     lang_lower = language.lower().strip()
     if lang_lower in ("uxp", "uxpscript"):
-        wrapped = _build_uxp_wrapper(code, close_unexpected_documents=close_unexpected_documents)
+        wrapped, offset = _build_uxp_wrapper(code, close_unexpected_documents=close_unexpected_documents)
         if undo_mode == "entire":
-            return _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
+            result = _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
         elif undo_mode == "auto":
-            return _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_SCRIPT_REQUEST)
+            result = _execute_uxp_with_undo(app, wrapped, undo_name, UNDO_SCRIPT_REQUEST)
         else:
-            return _execute_uxp(app, wrapped)
+            result = _execute_uxp(app, wrapped)
+        return _postprocess(result, code, offset, debug, uxp=True)
 
     # Default: ExtendScript (ES3)
-    wrapped = _build_wrapper(code, close_unexpected_documents=close_unexpected_documents)
+    wrapped, offset = _build_wrapper(
+        code,
+        close_unexpected_documents=close_unexpected_documents,
+        track_changes=track_changes,
+    )
 
     if undo_mode == "entire":
-        return _execute_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
+        result = _execute_with_undo(app, wrapped, undo_name, UNDO_ENTIRE_SCRIPT)
     elif undo_mode == "auto":
-        return _execute_with_undo(app, wrapped, undo_name, UNDO_SCRIPT_REQUEST)
+        result = _execute_with_undo(app, wrapped, undo_name, UNDO_SCRIPT_REQUEST)
     else:
         # "none" or unknown → plain 2-param DoScript (no undo grouping)
-        return _execute(app, wrapped)
+        result = _execute(app, wrapped)
+
+    if not result.get("success") and result.get("name") == "COMError" and is_connected():
+        located = _locate_syntax_error(app, code)
+        if located:
+            result.update(located)
+            return _postprocess(result, code, 0, debug, uxp=False)
+    return _postprocess(result, code, offset, debug, uxp=False)
+
+
+# ExtendScript syntax probe: compiles the user code as a function body without
+# calling it. The code arrives via DoScript withArguments (no string escaping);
+# top-level ``arguments`` must be captured outside the IIFE.
+_SYNTAX_CHECK_JSX = (
+    "var __mcpSrc = arguments[0];\n"
+    "(function() {\n"
+    "    try { eval('(function(){\\n' + __mcpSrc + '\\n})'); return ''; }\n"
+    "    catch (e) { return (e.name || 'SyntaxError') + '\\u0001' + (e.message || String(e)) + '\\u0001' + e.line; }\n"
+    "})();\n"
+)
+
+_UXP_FRAME_RE = re.compile(r"index\d*\.js:(\d+):(\d+)")
+
+
+def _locate_syntax_error(app, code: str) -> dict | None:
+    """Return ``{error, name, line}`` for an ExtendScript compile error, else None."""
+    try:
+        raw = app.DoScript(_SYNTAX_CHECK_JSX, SCRIPT_LANGUAGE_JAVASCRIPT, [code])
+    except pywintypes.com_error:
+        return None
+    if not raw or not isinstance(raw, str) or "\u0001" not in raw:
+        return None
+    _name, message, line = raw.split("\u0001", 2)
+    try:
+        user_line = int(line) - 1  # the probe prepends one line
+    except ValueError:
+        user_line = -1
+    return {
+        "error": message,
+        "name": "SyntaxError",
+        "line": user_line,
+        "source": "syntax check (nothing was executed)",
+    }
+
+
+def _postprocess(result: dict, code: str, offset: int, debug: bool, uxp: bool) -> dict:
+    """Map wrapper line numbers to user-code lines and drop empty change records."""
+    changes = result.get("changes")
+    if not isinstance(changes, dict) or (
+        not changes.get("tracked_count") and "host_document" not in changes
+    ):
+        result.pop("changes", None)
+
+    number = result.pop("number", None)
+    if result.get("success"):
+        return result
+
+    lines = code.split("\n")
+    raw_line = result.get("line", -1)
+    stack = result.pop("stack", "") if uxp else ""
+    if uxp and (not isinstance(raw_line, int) or raw_line < 0) and stack:
+        m = _UXP_FRAME_RE.search(stack)
+        if m:
+            raw_line = int(m.group(1))
+
+    user_line = -1
+    if isinstance(raw_line, int) and raw_line > 0:
+        candidate = raw_line - offset
+        if 1 <= candidate <= len(lines):
+            user_line = candidate
+        elif offset:
+            result["wrapper_line"] = raw_line
+    result["line"] = user_line
+
+    if user_line > 0:
+        result["source_line"] = lines[user_line - 1].strip()[:200]
+        if debug:
+            lo, hi = max(1, user_line - 3), min(len(lines), user_line + 3)
+            result["context"] = [
+                f"{'>' if n == user_line else ' '}{n:4d}| {lines[n - 1]}" for n in range(lo, hi + 1)
+            ]
+    if debug:
+        if number is not None:
+            result["error_number"] = number
+        if stack:
+            def _frame(m: re.Match) -> str:
+                n = int(m.group(1)) - offset
+                if 1 <= n <= len(lines):
+                    return f"user-code:{n}:{m.group(2)}"
+                return f"mcp-wrapper:{m.group(1)}:{m.group(2)}"
+            result["stack"] = _UXP_FRAME_RE.sub(_frame, stack)
+    return result
 
 
 def eval_expr(

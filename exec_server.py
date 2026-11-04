@@ -8,7 +8,7 @@
 """
 InDesign Exec MCP Server.
 
-Provides 8 tools for executing JSX code in Adobe InDesign via COM/OLE:
+Provides 11 tools for executing JSX code in Adobe InDesign via COM/OLE:
   1. run_jsx             - Execute JSX code with undo grouping
   2. get_document_info   - Query active document overview + active view context
   3. get_selection       - Query current selection
@@ -17,6 +17,9 @@ Provides 8 tools for executing JSX code in Adobe InDesign via COM/OLE:
   6. report_learning     - Submit local pitfall/best-practice learnings
   7. get_gotchas         - Retrieve curated gotchas (optionally context-filtered)
   8. get_quick_reference - DOM cheatsheet for common access patterns
+  9. get_change_log      - Objects changed by mutating run_jsx calls
+ 10. preflight_document  - Run a preflight profile, report findings (read-only)
+ 11. typography_audit    - Fonts, sizes, style usage and overrides (read-only)
 
 Requires InDesign Desktop running on Windows.
 Uses UndoModes.ENTIRE_SCRIPT to group all operations per call.
@@ -40,6 +43,9 @@ BASE_DIR = Path(__file__).parent
 GOTCHAS_PATH = BASE_DIR / "gotchas.json"
 SUBMISSIONS_DIR = BASE_DIR / "submissions"
 SUBMISSIONS_PATH = SUBMISSIONS_DIR / "pending.jsonl"
+CHANGE_LOG_DIR = BASE_DIR / "logs"
+CHANGE_LOG_PATH = CHANGE_LOG_DIR / "change_log.jsonl"
+CHANGE_LOG_LIST_CAP = 20
 
 ALLOWED_LEARNING_CATEGORIES = {"dom", "scriptui", "extendscript", "uxp", "execution", "serialization"}
 ALLOWED_LEARNING_SEVERITIES = {"blocker", "warning", "tip"}
@@ -66,6 +72,12 @@ mcp = FastMCP(
         "  __result = {name: doc.name, pages: doc.pages.length};\n\n"
         "Do NOT use return statements — the wrapper handles serialisation.\n"
         "Always verify results after modifications using eval_expression or get_document_info.\n"
+        "ERRORS: run_jsx reports `line` relative to YOUR code plus `source_line`; syntax errors are located "
+        "without executing anything. Pass debug=true for surrounding source lines (and the mapped UXP stack).\n"
+        "CHANGE LOG: mutating run_jsx calls record added/removed page items of the host document; call "
+        "__mcpTrack(obj, 'note') in your code to log modified objects. Query with get_change_log.\n"
+        "READ-ONLY CHECKS: preflight_document (preflight profile findings), typography_audit (fonts, sizes, "
+        "style usage, overrides, overset).\n"
         "Use the InDesign DOM MCP server to look up classes, properties and methods "
         "before writing script code.\n\n"
         "PERFORMANCE: InDesign has a powerful Collection API. ALWAYS prefer collection methods "
@@ -196,6 +208,25 @@ Note: Standalone InDesign scripts via COM do not pump background socket loops fo
   Always provide a descriptive `undo_name` like "Agent: Format headings".
 - `undo_mode="none"` — for read-only queries. No undo step created.
 - `undo_mode="auto"` — each DOM change gets its own undo step.
+
+## Errors and Debugging
+- Error results carry `line` relative to your code (1-based) and `source_line`.
+- Syntax errors are located by a compile-only probe (`source: "syntax check (nothing was executed)"`).
+- `debug=true` adds `context` (±3 source lines) and, for UXP, the stack mapped to your lines.
+
+## Change Log
+- Mutating calls (`undo_mode` "entire"/"auto", ExtendScript) return `changes`: host document,
+  added page items (id/type/page), removed ids, page/story deltas.
+- Property edits are not diffed. Record them with `__mcpTrack(obj, "note")`; it returns `obj`:
+
+      __mcpTrack(tf, "contents").contents = "New text";
+
+- `get_change_log()` lists the entries of this session (`all_sessions=true` for older ones).
+
+## Read-only Checks
+- `preflight_document(profile?, document?)` — findings of a preflight profile, profile source, completeness.
+- `typography_audit(document?)` — fonts with status, size/leading pairs, paragraph/character style usage,
+  local overrides, unstyled paragraphs, overset stories (samples carry page names).
 
 ## Workflow Pattern
 1. **Inspect**: `get_document_info` or `eval_expression` to understand the document
@@ -420,6 +451,9 @@ def _unwrap_result(result: dict) -> dict:
         out = {"success": True, **data}
     else:
         out = dict(result)
+        # Line numbers of fixed tool JSX mean nothing to the caller.
+        out.pop("line", None)
+        out.pop("source_line", None)
     for key in ("closed_unexpected_documents", "unexpected_documents", "warning"):
         val = result.get(key)
         if val:
@@ -484,6 +518,8 @@ def run_jsx(
     undo_mode: str = "entire",
     language: str = "javascript",
     close_unexpected_documents: bool = True,
+    debug: bool = False,
+    track_changes: bool | None = None,
 ) -> str:
     """Execute ExtendScript (JSX) or UXP JavaScript code in InDesign.
 
@@ -528,6 +564,15 @@ def run_jsx(
       warning as a stop sign and verify the host before the next edit. Set false only when
       the script intentionally opens another file that must remain open (detection still runs).
 
+    ERRORS: `line` is relative to YOUR code (1-based) and `source_line` holds its text.
+      Syntax errors are located by a compile-only probe; nothing was executed then.
+      debug=True adds `context` (±3 lines) and, for UXP, the stack mapped to your lines.
+
+    CHANGE LOG: with undo_mode 'entire'/'auto' (ExtendScript), added/removed page items,
+      page/story deltas of the host document are returned as `changes` and logged
+      (see get_change_log). Property edits are not diffed: wrap modified objects with
+      __mcpTrack(obj, "note") — it returns obj, so `__mcpTrack(tf).contents = "x"` works.
+
     Args:
         code: The script code to execute. Assign to __result to return data.
         undo_name: Human-readable label for Edit > Undo (e.g. "Agent: Format headings")
@@ -536,10 +581,15 @@ def run_jsx(
                    "none" skips undo tracking (for read-only operations)
         language: "javascript" for ExtendScript ES3 (default) or "uxp" for modern JS (ES6+/V8)
         close_unexpected_documents: Close foreign docs opened mid-script (default True)
+        debug: Return source context around an error (default False)
+        track_changes: Diff page items of the host document. Default: on unless undo_mode="none".
     """
     err = _check_connection()
     if err:
         return _fmt({"success": False, "error": err})
+
+    if track_changes is None:
+        track_changes = undo_mode != "none"
 
     try:
         result = com.run_jsx(
@@ -548,10 +598,101 @@ def run_jsx(
             undo_mode=undo_mode,
             language=language,
             close_unexpected_documents=close_unexpected_documents,
+            track_changes=track_changes,
+            debug=debug,
         )
-        return _fmt(result)
     except Exception as e:
-        return _fmt({"success": False, "error": str(e), "name": type(e).__name__})
+        result = {"success": False, "error": str(e), "name": type(e).__name__}
+
+    if undo_mode != "none" or result.get("changes"):
+        _record_change(result, code, undo_name, undo_mode, language)
+    return _fmt(result)
+
+
+# ---------------------------------------------------------------------------
+# Change log (fed by run_jsx)
+# ---------------------------------------------------------------------------
+
+SESSION_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+_session_changes: list[dict] = []
+
+
+def _record_change(result: dict, code: str, undo_name: str, undo_mode: str, language: str) -> None:
+    """Append one run_jsx call to the in-memory and on-disk change log."""
+    changes = result.get("changes") or {}
+    entry = {
+        "timestamp": _utc_now_iso(),
+        "session": SESSION_ID,
+        "undo_name": undo_name,
+        "undo_mode": undo_mode,
+        "language": language,
+        "success": bool(result.get("success")),
+        "document": changes.get("host_document"),
+    }
+    if not entry["success"]:
+        entry["error"] = result.get("error")
+        entry["line"] = result.get("line")
+        entry["partial_changes_possible"] = undo_mode != "none"
+    for key in ("added_count", "removed_count", "pages_delta", "stories_delta", "tracked_count",
+                "id_diff_skipped"):
+        if changes.get(key):
+            entry[key] = changes[key]
+    for key in ("added", "removed_ids", "tracked"):
+        if changes.get(key):
+            entry[key] = changes[key][:CHANGE_LOG_LIST_CAP]
+    if result.get("warning"):
+        entry["warning"] = result["warning"]
+    entry["code_preview"] = code[:300]
+
+    _session_changes.append(entry)
+    try:
+        CHANGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with CHANGE_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+@mcp.tool()
+def get_change_log(
+    limit: int = 20,
+    document: str | None = None,
+    all_sessions: bool = False,
+) -> str:
+    """List what mutating run_jsx calls changed (newest first).
+
+    Each entry: undo_name, host document, success, added page items (id/type/page),
+    removed ids, page/story deltas and objects recorded via __mcpTrack(obj, note).
+    Use it for the completion report and to locate objects to verify or revert.
+
+    Args:
+        limit: Maximum number of entries (default 20).
+        document: Only entries whose host document name or path contains this text.
+        all_sessions: Include earlier server sessions from logs/change_log.jsonl.
+    """
+    limit = max(1, min(limit, 500))
+    entries: list[dict]
+    if all_sessions and CHANGE_LOG_PATH.exists():
+        entries = []
+        for line in CHANGE_LOG_PATH.read_text(encoding="utf-8").splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    else:
+        entries = list(_session_changes)
+
+    if document:
+        needle = document.lower()
+        entries = [
+            e for e in entries
+            if e.get("document") and (
+                needle in str(e["document"].get("name", "")).lower()
+                or needle in str(e["document"].get("path", "")).lower()
+            )
+        ]
+    entries = entries[-limit:][::-1]
+    return _fmt({"success": True, "session": SESSION_ID, "count": len(entries), "entries": entries})
 
 
 # ---------------------------------------------------------------------------
@@ -1364,6 +1505,411 @@ def get_quick_reference() -> str:
 
     dynamic_section = "\n## Community Gotchas (from gotchas.json)\n" + "\n".join(community_lines) + "\n"
     return _QUICK_REFERENCE + dynamic_section
+
+
+# ---------------------------------------------------------------------------
+# Shared JSX: resolve the target document by name, full path or id
+# ---------------------------------------------------------------------------
+
+_RESOLVE_DOC_JSX = """\
+function __mcpResolveDoc(spec) {
+    if (!app.documents.length) throw new Error("No document open in InDesign.");
+    if (spec === null || spec === "") return app.activeDocument;
+    var names = [];
+    for (var i = 0; i < app.documents.length; i++) {
+        var d = app.documents[i];
+        var path = "";
+        try { path = String(d.fullName.fsName); } catch (e) {}
+        if (String(d.name) === spec || path === spec || String(d.id) === spec) return d;
+        names.push(String(d.name));
+    }
+    throw new Error("Document not found: " + spec + ". Open documents: " + names.join(", "));
+}
+"""
+
+
+def _doc_spec_literal(document: str | None) -> str:
+    """Encode the document selector as a JS literal for __mcpResolveDoc."""
+    return json.dumps(document.strip()) if document and document.strip() else "null"
+
+
+# ---------------------------------------------------------------------------
+# Tool 10: preflight_document
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_JSX = _RESOLVE_DOC_JSX + """\
+var doc = __mcpResolveDoc($DOC$);
+var wanted = $PROFILE$;
+var maxFindings = $MAX$;
+
+function findProfile(coll, name) {
+    for (var i = 0; i < coll.length; i++) {
+        if (String(coll[i].name) === name) return coll[i];
+    }
+    return null;
+}
+function profileNames(coll) {
+    var out = [];
+    for (var i = 0; i < coll.length; i++) out.push(String(coll[i].name));
+    return out;
+}
+
+var profile = null, source = "";
+if (wanted !== null) {
+    profile = findProfile(doc.preflightProfiles, wanted);
+    source = "document (embedded)";
+    if (!profile) { profile = findProfile(app.preflightProfiles, wanted); source = "application"; }
+} else {
+    var wp = doc.preflightOptions.preflightWorkingProfile;
+    if (wp && typeof wp !== "string" && wp.isValid) {
+        profile = wp;
+        source = "document working profile";
+    } else if (typeof wp === "string" && wp !== "") {
+        profile = findProfile(doc.preflightProfiles, wp) || findProfile(app.preflightProfiles, wp);
+        source = "document working profile (by name)";
+    }
+}
+if (!profile) {
+    throw new Error("Preflight profile not found: " + (wanted === null ? "(document working profile)" : wanted) +
+        ". Document profiles: " + profileNames(doc.preflightProfiles).join(" | ") +
+        ". Application profiles: " + profileNames(app.preflightProfiles).join(" | "));
+}
+
+var opts = doc.preflightOptions;
+var modifiedBefore = doc.modified;
+var t0 = new Date().getTime();
+var proc = app.preflightProcesses.add(doc, profile);
+// waitForProcess() returns false even after completion; completeness is read from processResults.
+try { proc.waitForProcess($TIMEOUT$); } catch (eWait) {}
+var elapsed = new Date().getTime() - t0;
+
+var rows = [];
+var readError = null;
+try {
+    var agg = proc.aggregatedResults;
+    rows = (agg && agg[2]) ? agg[2] : [];
+} catch (eAgg) { readError = String(eAgg.message || eAgg); }
+var report = "";
+try { report = String(proc.processResults).replace(/\\s+$/, ""); } catch (eRep) {}
+try { proc.remove(); } catch (eRem) {}
+
+// Rows are a pre-order tree: row[0] is the level; rows without page/info/details are
+// category nodes ("TEXT (2)" > "Overset text (2)"), the others are the affected items.
+var byCategory = {}, findings = [], path = [], total = 0;
+for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    var level = Number(row[0]) || 1;
+    var label = String(row[1]);
+    var info = String(row[3] || "");
+    var page = String(row[2] || "");
+    var hasDetails = row[4] && row[4].length;
+    if (!page && !info && !hasDetails) {
+        path.length = Math.min(path.length, Math.max(0, level - 1));
+        path.push(label.replace(/\\s*\\(\\d+\\)$/, ""));
+        continue;
+    }
+    total++;
+    var category = path.slice(0, Math.max(0, level - 1)).join(" > ") || path.join(" > ");
+    byCategory[category] = (byCategory[category] || 0) + 1;
+    if (findings.length < maxFindings) {
+        var details = [];
+        if (hasDetails) {
+            for (var j = 0; j < row[4].length; j++) {
+                details.push(String(row[4][j][0]) + ": " + String(row[4][j][1]));
+            }
+        }
+        findings.push({ category: category, item: label, page: page, details: details.length ? details : [info] });
+    }
+}
+var stillRunning = /still looking/i.test(report);
+
+__result = {
+    document: { name: String(doc.name), path: doc.saved ? String(doc.fullName.fsName) : "(unsaved)" },
+    profile: { name: String(profile.name), source: source },
+    settings: {
+        scope: String(opts.preflightScope),
+        layers: String(opts.preflightWhichLayers),
+        include_pasteboard: opts.preflightIncludeObjectsOnPasteboard,
+        include_nonprinting: opts.preflightIncludeNonprintingObjects,
+        live_preflight_off: opts.preflightOff
+    },
+    complete: !stillRunning && readError === null,
+    read_error: readError,
+    elapsed_ms: elapsed,
+    findings_total: total,
+    by_category: byCategory,
+    findings: findings,
+    findings_truncated: total > findings.length,
+    process_results: report,
+    document_modified_before: modifiedBefore,
+    document_modified_after: doc.modified
+};
+"""
+
+
+@mcp.tool()
+def preflight_document(
+    profile: str | None = None,
+    document: str | None = None,
+    max_findings: int = 100,
+    timeout_s: int = 120,
+) -> str:
+    """Run a preflight profile on a document and report the findings. Read-only.
+
+    Reports what actually happened, not what was requested: the profile used and
+    where it came from (document working profile, embedded, application), whether
+    the process finished within timeout_s (`complete`), the scope/layer settings
+    the document applies, counts per category and the findings (category, item,
+    page, details). `complete: false` means the findings may be incomplete.
+
+    Args:
+        profile: Profile name. Default: the document's working preflight profile.
+        document: Document name, full path or id. Default: active document.
+        max_findings: Maximum findings listed (counts per rule are always complete).
+        timeout_s: Seconds to wait for the preflight process.
+    """
+    err = _check_document()
+    if err:
+        return _fmt({"success": False, "error": err})
+
+    jsx = (
+        _PREFLIGHT_JSX
+        .replace("$DOC$", _doc_spec_literal(document))
+        .replace("$PROFILE$", json.dumps(profile) if profile else "null")
+        .replace("$MAX$", str(max(0, min(max_findings, 2000))))
+        .replace("$TIMEOUT$", str(max(1, min(timeout_s, 900))))
+    )
+    try:
+        result = com.run_jsx(jsx, undo_mode="none")
+        return _fmt(_unwrap_result(result))
+    except Exception as e:
+        return _fmt({"success": False, "error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Tool 11: typography_audit
+# ---------------------------------------------------------------------------
+
+_TYPO_AUDIT_JSX = _RESOLVE_DOC_JSX + """\
+var doc = __mcpResolveDoc($DOC$);
+var maxParagraphs = $MAXPARA$;
+var maxSamples = $SAMPLES$;
+var includeTables = $TABLES$;
+
+var fontStatus = {};
+var docFonts = doc.fonts.everyItem().getElements();
+for (var df = 0; df < docFonts.length; df++) {
+    try { fontStatus[String(docFonts[df].name)] = String(docFonts[df].status); } catch (eF) {}
+}
+
+var noStyleId = doc.paragraphStyles[0].id;
+var fonts = {}, sizes = {}, pstyles = {}, cstyles = {};
+var unstyled = { paragraphs: 0, samples: [] };
+var counted = { containers: 0, paragraphs: 0, characters: 0 };
+var truncated = false;
+
+function pageOf(textObj) {
+    try {
+        var f = textObj.parentTextFrames;
+        if (f && f.length && f[0].parentPage) return String(f[0].parentPage.name);
+    } catch (e) {}
+    return null;
+}
+function sample(textObj) {
+    var s = "";
+    try { s = String(textObj.contents); } catch (e) {}
+    s = s.replace(/[\\r\\n]+/g, " ");
+    return { page: pageOf(textObj), preview: s.length > 60 ? s.substring(0, 60) : s };
+}
+function styleLabel(style) {
+    var name = String(style.name);
+    try {
+        if (style.parent.constructor.name.indexOf("StyleGroup") > -1) name = String(style.parent.name) + ":" + name;
+    } catch (e) {}
+    return name;
+}
+function asArray(v, n) {
+    if (v instanceof Array) return v;
+    var out = [];
+    for (var i = 0; i < n; i++) out.push(v);
+    return out;
+}
+
+function auditText(txt) {
+    var nRanges = txt.textStyleRanges.length;
+    if (!nRanges) return;
+    var nParas = txt.paragraphs.length;
+    if (counted.paragraphs + nParas > maxParagraphs) { truncated = true; return; }
+    counted.containers++;
+    counted.paragraphs += nParas;
+
+    var all = txt.textStyleRanges.everyItem();
+    var contents = asArray(all.contents, nRanges);
+    var rFonts = asArray(all.appliedFont, nRanges);
+    var rSizes = asArray(all.pointSize, nRanges);
+    var rLead = asArray(all.leading, nRanges);
+    var rAuto = asArray(all.autoLeading, nRanges);
+    var rCs = asArray(all.appliedCharacterStyle, nRanges);
+
+    for (var i = 0; i < nRanges; i++) {
+        var len = (typeof contents[i] === "string") ? contents[i].length : 1;
+        counted.characters += len;
+
+        var fname = "unresolved";
+        try { fname = (typeof rFonts[i] === "string") ? rFonts[i] : String(rFonts[i].name); } catch (eN) {}
+        var fr = fonts[fname];
+        if (!fr) {
+            var st = fontStatus[fname];
+            if (st === undefined) {
+                try { st = String(rFonts[i].status); } catch (eS) { st = "UNKNOWN"; }
+            }
+            var parts = fname.split("\\t");
+            fr = fonts[fname] = { family: parts[0], style: parts[1] || "", status: st, characters: 0, ranges: 0, samples: [] };
+        }
+        fr.characters += len;
+        fr.ranges++;
+        if (fr.status !== "INSTALLED" && fr.samples.length < maxSamples) fr.samples.push(sample(txt.textStyleRanges[i]));
+
+        var lead = (rLead[i] == Leading.AUTO) ? "auto " + rAuto[i] + "%" : rLead[i];
+        var sk = rSizes[i] + "/" + lead;
+        var sr = sizes[sk];
+        if (!sr) sr = sizes[sk] = { size: rSizes[i], leading: lead, characters: 0 };
+        sr.characters += len;
+
+        var csName = "[None]";
+        try { csName = styleLabel(rCs[i]); } catch (eC) {}
+        cstyles[csName] = (cstyles[csName] || 0) + len;
+    }
+
+    if (!nParas) return;
+    var paras = txt.paragraphs.everyItem();
+    var pStyle = asArray(paras.appliedParagraphStyle, nParas);
+    var pOver = asArray(paras.styleOverridden, nParas);
+    for (var p = 0; p < nParas; p++) {
+        var style = pStyle[p];
+        var sid = String(style.id);
+        var rec = pstyles[sid];
+        if (!rec) rec = pstyles[sid] = { name: styleLabel(style), paragraphs: 0, overridden: 0, overridden_samples: [] };
+        rec.paragraphs++;
+        if (pOver[p]) {
+            rec.overridden++;
+            if (rec.overridden_samples.length < maxSamples) rec.overridden_samples.push(sample(txt.paragraphs[p]));
+        }
+        if (style.id === noStyleId) {
+            unstyled.paragraphs++;
+            if (unstyled.samples.length < maxSamples) unstyled.samples.push(sample(txt.paragraphs[p]));
+        }
+    }
+}
+
+var stories = doc.stories.everyItem().getElements();
+var overset = { count: 0, samples: [] };
+for (var s = 0; s < stories.length && !truncated; s++) {
+    var story = stories[s];
+    auditText(story);
+    try {
+        if (story.overflows) {
+            overset.count++;
+            if (overset.samples.length < maxSamples) {
+                var tc = story.textContainers;
+                var last = tc.length ? tc[tc.length - 1] : null;
+                var pg = null;
+                try { if (last && last.parentPage) pg = String(last.parentPage.name); } catch (eP) {}
+                overset.samples.push({ page: pg, preview: String(story.contents).substring(0, 60).replace(/[\\r\\n]+/g, " ") });
+            }
+        }
+    } catch (eO) {}
+    try {
+        var notes = story.footnotes.everyItem().getElements();
+        for (var fn = 0; fn < notes.length && !truncated; fn++) {
+            if (notes[fn].texts.length) auditText(notes[fn].texts[0]);
+        }
+    } catch (eFn) {}
+    if (includeTables && story.tables.length) {
+        var cells = story.tables.everyItem().cells.everyItem().getElements();
+        for (var c = 0; c < cells.length && !truncated; c++) {
+            if (cells[c].texts.length) auditText(cells[c].texts[0]);
+        }
+    }
+}
+
+function sortedList(map, key) {
+    var out = [];
+    for (var k in map) {
+        if (map.hasOwnProperty(k)) {
+            var v = map[k];
+            if (key === "font") v.name = k;
+            out.push(v);
+        }
+    }
+    out.sort(function (a, b) { return (b.characters || b.paragraphs || 0) - (a.characters || a.paragraphs || 0); });
+    return out;
+}
+var fontList = sortedList(fonts, "font");
+var problemFonts = [];
+for (var fi = 0; fi < fontList.length; fi++) {
+    if (fontList[fi].status !== "INSTALLED") problemFonts.push(fontList[fi].name + " (" + fontList[fi].status + ")");
+    if (fontList[fi].status === "INSTALLED") delete fontList[fi].samples;
+}
+var csList = [];
+for (var cn in cstyles) if (cstyles.hasOwnProperty(cn)) csList.push({ name: cn, characters: cstyles[cn] });
+csList.sort(function (a, b) { return b.characters - a.characters; });
+var sizeList = sortedList(sizes, "size");
+
+__result = {
+    document: String(doc.name),
+    scanned: counted,
+    truncated: truncated,
+    problem_fonts: problemFonts,
+    fonts: fontList,
+    sizes: sizeList.slice(0, 40),
+    sizes_total: sizeList.length,
+    paragraph_styles: sortedList(pstyles, "para"),
+    character_styles: csList,
+    unstyled_paragraphs: unstyled,
+    overset_stories: overset
+};
+"""
+
+
+@mcp.tool()
+def typography_audit(
+    document: str | None = None,
+    include_tables: bool = True,
+    max_paragraphs: int = 50000,
+    samples: int = 3,
+) -> str:
+    """Audit the typography of a document without changing it.
+
+    Reports fonts in use (with status and character counts; samples with page for
+    fonts that are not INSTALLED), size/leading combinations, paragraph styles with
+    paragraph counts and local overrides (samples with page), character style usage,
+    paragraphs in [No Paragraph Style] and overset stories. Findings are not judged;
+    deciding what is wrong is up to the operator. Covers all stories (pages, parent
+    pages, pasteboard), their footnotes and optionally table cells.
+
+    Args:
+        document: Document name, full path or id. Default: active document.
+        include_tables: Also scan table cell text (default True).
+        max_paragraphs: Stop after this many paragraphs (`truncated: true`).
+        samples: Samples per finding (page + text preview).
+    """
+    err = _check_document()
+    if err:
+        return _fmt({"success": False, "error": err})
+
+    jsx = (
+        _TYPO_AUDIT_JSX
+        .replace("$DOC$", _doc_spec_literal(document))
+        .replace("$MAXPARA$", str(max(1, max_paragraphs)))
+        .replace("$SAMPLES$", str(max(0, min(samples, 20))))
+        .replace("$TABLES$", "true" if include_tables else "false")
+    )
+    try:
+        result = com.run_jsx(jsx, undo_mode="none", track_changes=False)
+        return _fmt(_unwrap_result(result))
+    except Exception as e:
+        return _fmt({"success": False, "error": str(e)})
 
 
 # ---------------------------------------------------------------------------

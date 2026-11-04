@@ -30,6 +30,16 @@ For non-trivial tasks, run these steps in order:
 
 For strictly read-only checks, use `undo_mode="none"`.
 
+## Errors, Debugging & Change Log
+- Error results carry `line` relative to your code plus `source_line`. A `source` of "syntax check (nothing was executed)" means the code never ran.
+- Re-run with `debug=true` when the line alone does not explain the error (adds ±3 source lines; for UXP the stack mapped to your lines).
+- Mutating `run_jsx` calls return `changes`: added page items (id/type/page), removed ids, page/story deltas of the host document. Property edits are not diffed; wrap edited objects with `__mcpTrack(obj, "note")` (returns `obj`).
+- `get_change_log()` lists all changes of the session; use it for the completion report and targeted verification.
+
+## Acceptance Checks (read-only)
+- `typography_audit()`: fonts with status, size/leading pairs, style usage, local overrides, unstyled paragraphs, overset stories (samples with page names).
+- `preflight_document()`: findings of the document's working preflight profile (or `profile="..."`). Check `complete` before trusting an empty result. Run before PDF export.
+
 ## Script Labels Policy
 - Temporary keys must start with `_tmp_`.
 - Persistent keys must start with `agentContext_`.
@@ -63,6 +73,7 @@ For strictly read-only checks, use `undo_mode="none"`.
 ## UXP Script Rules (`language="uxp"`)
 - Must import InDesign DOM: `const { app, ...enums } = require('indesign');` (or `require('indesign').app`).
 - Enums are exported by `require('indesign')` (e.g. `const { Justification, UndoModes } = require('indesign');`).
+- Look up the DOM with `runtime="uxp"` (`get_methods`, `search_dom`) and respect `uxp_note` / `extendscript_only` in results (no `collection[i]`, compare enums with `equals()`, File/Folder are async).
 - Top-level `await` is natively supported inside user code.
 - Assign outputs to `__result` (the MCP wrapper handles serialisation via labels).
 - All runtime exceptions and engine syntax errors are safely caught and auto-dismissed by the MCP wrapper.
@@ -99,6 +110,9 @@ When reporting task completion:
 - State what was verified.
 - State whether undo is possible and what label was used.
 - State whether temporary labels were cleaned up.
+- List the changed objects (from `changes` / `get_change_log()`), including failed calls that may have left partial changes.
 
 ## Additional Reference
 See [reference.md](reference.md) for reusable prompts and short templates.
+
+After editing this skill, run `python check_docs.py` in the MCP repo: it fails when a tool or parameter named here does not exist.
