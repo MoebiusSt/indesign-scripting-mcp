@@ -15,8 +15,10 @@ Provides tools for querying multi-source ExtendScript knowledge:
   5. get_enum_values    – Enum constant values
   6. get_hierarchy      – Inheritance chain + subclasses
   7. search_dom         – Full-text search
-  8. list_classes       – Class overview by suite/type
+  8. list_classes       – Class overview by kind/name
   9. dom_info           – DB metadata and statistics
+
+Data source: https://www.indesignjs.de/indesignapi/ (Gregor Fellenz), built via manage.py.
 """
 
 import json
@@ -44,16 +46,23 @@ mcp = FastMCP(
     "InDesign DOM",
     instructions=(
         "This server provides access to three knowledge sources for InDesign scripting:\n"
-        "1. InDesign DOM: classes, properties, methods, enums and inheritance.\n"
+        "1. InDesign DOM: classes, collections, enums, properties, events, methods and inheritance.\n"
         "2. ExtendScript JavaScript Core: Adobe-specific JS extensions ($, UnitValue, "
         "File, Folder, Socket, XML/XMLList, RegExp, Reflection).\n"
-        "3. ScriptUI: legacy dialog/UI framework (Window, Button, EditText, ListBox).\n\n"
+        "3. ScriptUI: legacy dialog/UI framework (Window, Button, EditText, ListBox).\n"
+        "Data comes from the indesignjs.de API reference (Gregor Fellenz); dom_info() shows the "
+        "InDesign object model version.\n\n"
         "Call knowledge_overview() first to see available capabilities.\n"
         "Use source='dom'|'javascript'|'scriptui' to disambiguate duplicate class names "
-        "such as Window, Group, Panel, and Event.\n\n"
+        "such as Window, Group, Panel, Event, Button and ListBox.\n\n"
         "IMPORTANT: For ExtendScript code generation, check JavaScript source for "
         "UnitValue, $, File/Folder, Socket, and XML/XMLList before assuming "
         "standard JavaScript behavior.\n\n"
+        "UXP: the InDesign DOM is shared by ExtendScript and UXP. Entries with uxp_note behave "
+        "differently in UXP; extendscript_only methods (e.g. the collection index accessor '[]') do "
+        "not exist there. Pass runtime='uxp' to get_methods/search_dom to hide them, or "
+        "runtime='extendscript' to suppress UXP notes.\n\n"
+        "Every lookup_class result has doc_url, the upstream Markdown page of that object.\n\n"
         "TIP: For common DOM patterns (navigation, page items, images, text, styles, "
         "geometry, find/change, export), the InDesign Exec MCP provides a "
         "get_quick_reference tool that returns a comprehensive cheatsheet. "
@@ -84,6 +93,13 @@ def _append_scriptui_note(payload, source: str | None):
     return payload
 
 
+def _check_runtime(runtime: str | None) -> str | None:
+    """Return an error message for an unknown runtime value."""
+    if runtime and runtime not in db.RUNTIMES:
+        return f"Invalid runtime '{runtime}'. Use one of: {', '.join(db.RUNTIMES)}."
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tool 1: lookup_class
 # ---------------------------------------------------------------------------
@@ -92,8 +108,8 @@ def _append_scriptui_note(payload, source: str | None):
 def lookup_class(name: str, source: str | None = None) -> str:
     """Look up full information for an InDesign DOM class.
 
-    Returns suite, superclass, description, property/method counts,
-    and direct subclasses.
+    Returns kind (object|collection|enum), superclass, description, property/method
+    counts, direct subclasses, collection element type, events, UXP note and doc_url.
 
     Args:
         name: The exact class name (e.g. "TextFrame", "Document", "Application")
@@ -115,20 +131,29 @@ def get_properties(
     source: str | None = None,
     filter: str | None = None,
     include_inherited: bool = False,
+    runtime: str | None = None,
 ) -> str:
     """Get properties of an InDesign DOM class.
+
+    Static members and enum values have element_type="class". Events are listed
+    by lookup_class.
 
     Args:
         class_name: The class name (e.g. "TextFrame")
         source: Optional source filter ("dom", "javascript", "scriptui")
         filter: Optional substring filter on property name or description
         include_inherited: If true, includes properties from superclasses
+        runtime: Optional "extendscript" (suppresses UXP notes) or "uxp"
     """
+    error = _check_runtime(runtime)
+    if error:
+        return error
     results = db.get_properties(
         class_name,
         source=source,
         filter_text=filter,
         include_inherited=include_inherited,
+        runtime=runtime,
         db_path=DB_PATH,
     )
     if not results:
@@ -149,6 +174,7 @@ def get_methods(
     source: str | None = None,
     filter: str | None = None,
     include_inherited: bool = False,
+    runtime: str | None = None,
 ) -> str:
     """Get methods of an InDesign DOM class with short signatures.
 
@@ -157,12 +183,18 @@ def get_methods(
         source: Optional source filter ("dom", "javascript", "scriptui")
         filter: Optional substring filter on method name or description
         include_inherited: If true, includes methods from superclasses
+        runtime: Optional "extendscript" (suppresses UXP notes) or "uxp" (omits
+            extendscript_only methods such as the '[]' index accessor)
     """
+    error = _check_runtime(runtime)
+    if error:
+        return error
     results = db.get_methods(
         class_name,
         source=source,
         filter_text=filter,
         include_inherited=include_inherited,
+        runtime=runtime,
         db_path=DB_PATH,
     )
     if not results:
@@ -233,17 +265,22 @@ def get_hierarchy(class_name: str, source: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def search_dom(query: str, source: str | None = None) -> str:
+def search_dom(query: str, source: str | None = None, runtime: str | None = None) -> str:
     """Full-text search across all InDesign DOM entities.
 
-    Searches class names, property names, method names, parameter names,
-    and their descriptions. Returns up to 20 results.
+    Searches class, property, event, method and parameter names and their
+    descriptions. Returns up to 20 results.
 
     Args:
         query: Search terms (e.g. "find grep change", "hyperlink", "export pdf")
         source: Optional source filter ("dom", "javascript", "scriptui")
+        runtime: Optional "extendscript" or "uxp"; "uxp" limits results to the InDesign DOM
+            and drops the '[]' index accessor
     """
-    results = db.search_dom(query, source=source, max_results=20, db_path=DB_PATH)
+    error = _check_runtime(runtime)
+    if error:
+        return error
+    results = db.search_dom(query, source=source, max_results=20, runtime=runtime, db_path=DB_PATH)
     if not results:
         return f"No results found for '{query}'."
     return _fmt(_append_scriptui_note(results, source))
@@ -255,23 +292,25 @@ def search_dom(query: str, source: str | None = None) -> str:
 
 @mcp.tool()
 def list_classes(
-    suite: str | None = None,
     type: str = "all",
     source: str | None = None,
+    filter: str | None = None,
 ) -> str:
-    """List InDesign DOM classes, optionally filtered by suite or type.
+    """List InDesign DOM classes, optionally filtered by kind or name.
 
     Args:
-        suite: Filter by suite name (e.g. "Text Suite", "Color Suite")
-        type: Filter by type: "class", "enum", or "all" (default)
+        type: "object", "collection", "enum", "class" (object + collection) or "all" (default)
         source: Optional source filter ("dom", "javascript", "scriptui")
+        filter: Optional substring filter on the class name (e.g. "Export", "Preference")
     """
-    results = db.list_classes(suite=suite, type_filter=type, source=source, db_path=DB_PATH)
+    if type not in db.CLASS_TYPE_FILTERS:
+        return f"Invalid type '{type}'. Use one of: {', '.join(db.CLASS_TYPE_FILTERS)}."
+    results = db.list_classes(type_filter=type, source=source, filter_text=filter, db_path=DB_PATH)
     if not results:
-        msg = "No classes found"
-        if suite:
-            msg += f" in suite '{suite}'"
-        return msg + "."
+        msg = f"No classes found (type='{type}'"
+        if filter:
+            msg += f", filter='{filter}'"
+        return msg + ")."
     return _fmt(_append_scriptui_note(results, source))
 
 
@@ -283,7 +322,8 @@ def list_classes(
 def dom_info() -> str:
     """Get InDesign DOM database metadata and statistics.
 
-    Returns DOM version, source file, build timestamp, and entity counts.
+    Returns upstream URL, object model version and generation date per source,
+    build timestamp, and entity counts.
     """
     result = db.dom_info(db_path=DB_PATH)
     return _fmt(result)

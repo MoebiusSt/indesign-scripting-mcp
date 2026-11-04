@@ -4,10 +4,20 @@ InDesign DOM Database Query Layer.
 Provides query functions for MCP tools with multi-source support.
 """
 
+import re
 import sqlite3
 from pathlib import Path
 
 DEFAULT_DB = Path(__file__).parent / "extendscript.db"
+
+RUNTIMES = ("extendscript", "uxp")
+CLASS_TYPE_FILTERS = {
+    "all": "",
+    "class": " AND c.is_enum = 0",
+    "enum": " AND c.kind = 'enum'",
+    "object": " AND c.kind = 'object'",
+    "collection": " AND c.kind = 'collection'",
+}
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -25,14 +35,20 @@ def _source_clause(source: str | None) -> tuple[str, tuple]:
     return "", ()
 
 
+def _with_uxp(item: dict, note: str | None, runtime: str | None = None) -> dict:
+    """Attach a UXP note unless the caller explicitly asked for ExtendScript only."""
+    if note and runtime != "extendscript":
+        item["uxp_note"] = note
+    return item
+
+
 def _class_rows(conn: sqlite3.Connection, name: str, source: str | None = None):
     """Fetch class rows by class name and optional source."""
     clause, params = _source_clause(source)
     return conn.execute(
-        f"""SELECT c.id, c.name, c.is_enum, c.is_dynamic, c.description, c.description_long,
-                  c.superclass_name, s.name AS suite_name, src.key AS source
+        f"""SELECT c.id, c.name, c.kind, c.is_enum, c.description, c.superclass_name, c.collection_of,
+                  c.doc_url, c.uxp_note, src.key AS source, src.uxp_note AS source_uxp_note
            FROM classes c
-           LEFT JOIN suites s ON c.suite_id = s.id
            JOIN sources src ON c.source_id = src.id
            WHERE c.name = ?{clause}
            ORDER BY src.key""",
@@ -61,24 +77,33 @@ def lookup_class(name: str, source: str | None = None, db_path: str | None = Non
                    WHERE c2.superclass_name = ?
                      AND c2.source_id = (SELECT source_id FROM classes WHERE id = ?)
                    ORDER BY c2.name""",
-                (name, class_id),
+                (row["name"], class_id),
             ).fetchall()
         ]
-        result.append(
-            {
-                "name": row["name"],
-                "source": row["source"],
-                "suite": row["suite_name"] or "",
-                "is_enum": bool(row["is_enum"]),
-                "is_dynamic": bool(row["is_dynamic"]),
-                "description": row["description"] or "",
-                "description_long": row["description_long"] or "",
-                "superclass": row["superclass_name"],
-                "property_count": prop_count,
-                "method_count": method_count,
-                "direct_subclasses": subclasses,
-            }
-        )
+        events = [
+            {"name": e["name"], "description": e["description"] or ""}
+            for e in conn.execute(
+                "SELECT name, description FROM events WHERE class_id = ? ORDER BY name", (class_id,)
+            ).fetchall()
+        ]
+        item = {
+            "name": row["name"],
+            "source": row["source"],
+            "kind": row["kind"],
+            "is_enum": bool(row["is_enum"]),
+            "description": row["description"] or "",
+            "superclass": row["superclass_name"],
+            "property_count": prop_count,
+            "method_count": method_count,
+            "direct_subclasses": subclasses,
+            "doc_url": row["doc_url"],
+        }
+        if row["collection_of"]:
+            item["collection_of"] = row["collection_of"]
+        if events:
+            item["events"] = events
+        _with_uxp(item, row["uxp_note"] or row["source_uxp_note"])
+        result.append(item)
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -88,6 +113,7 @@ def get_properties(
     source: str | None = None,
     filter_text: str | None = None,
     include_inherited: bool = False,
+    runtime: str | None = None,
     db_path: str | None = None,
 ) -> list[dict]:
     """Properties of one class, optionally source-filtered and inherited."""
@@ -108,7 +134,7 @@ def get_properties(
     query = f"""
         SELECT p.name, p.description, p.data_type, p.is_array, p.is_readonly,
                p.data_type_ref, p.element_type, p.default_value, p.min_value, p.max_value,
-               c.name AS class_name, src.key AS source
+               p.measurement_unit, p.uxp_note, c.name AS class_name, src.key AS source
         FROM properties p
         JOIN classes c ON p.class_id = c.id
         JOIN sources src ON c.source_id = src.id
@@ -126,8 +152,9 @@ def get_properties(
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
-    return [
-        {
+    result = []
+    for r in rows:
+        item = {
             "name": r["name"],
             "description": r["description"] or "",
             "data_type": r["data_type"],
@@ -138,11 +165,12 @@ def get_properties(
             "default_value": r["default_value"],
             "min_value": r["min_value"],
             "max_value": r["max_value"],
+            "measurement_unit": bool(r["measurement_unit"]),
             "defined_in": r["class_name"],
             "source": r["source"],
         }
-        for r in rows
-    ]
+        result.append(_with_uxp(item, r["uxp_note"], runtime))
+    return result
 
 
 def get_methods(
@@ -150,9 +178,13 @@ def get_methods(
     source: str | None = None,
     filter_text: str | None = None,
     include_inherited: bool = False,
+    runtime: str | None = None,
     db_path: str | None = None,
 ) -> list[dict]:
-    """Methods of one class with short signatures."""
+    """Methods of one class with short signatures.
+
+    runtime='uxp' drops methods that only exist in ExtendScript (e.g. the [] index accessor).
+    """
     conn = _connect(db_path)
 
     class_rows = _class_rows(conn, class_name, source)
@@ -169,7 +201,8 @@ def get_methods(
     placeholders = ",".join("?" for _ in class_ids)
     query = f"""
         SELECT m.id, m.name, m.description, m.return_type, m.return_is_array,
-               m.return_type_ref, m.element_type, c.name AS class_name, src.key AS source
+               m.return_type_ref, m.element_type, m.es_only, m.uxp_note,
+               c.name AS class_name, src.key AS source
         FROM methods m
         JOIN classes c ON m.class_id = c.id
         JOIN sources src ON c.source_id = src.id
@@ -181,6 +214,8 @@ def get_methods(
         query += " AND (m.name LIKE ? OR m.description LIKE ?)"
         like = f"%{filter_text}%"
         params.extend([like, like])
+    if runtime == "uxp":
+        query += " AND m.es_only = 0"
 
     query += " ORDER BY src.key, c.name, m.element_type, m.name"
 
@@ -197,26 +232,25 @@ def get_methods(
         for p in param_rows:
             ptype = p["data_type"] or "any"
             opt = "?" if p["is_optional"] else ""
-            sig_parts.append(f"{p['name']}: {ptype}{opt}")
+            sig_parts.append(f"{p['name']}{opt}: {ptype}")
 
         ret = r["return_type"] or "void"
-        if r["return_is_array"]:
-            ret += "[]"
         signature = f"({', '.join(sig_parts)}) -> {ret}"
 
-        result.append(
-            {
-                "name": r["name"],
-                "description": r["description"] or "",
-                "signature": signature,
-                "return_type": r["return_type"],
-                "return_type_ref": r["return_type_ref"],
-                "return_is_array": bool(r["return_is_array"]),
-                "element_type": r["element_type"],
-                "defined_in": r["class_name"],
-                "source": r["source"],
-            }
-        )
+        item = {
+            "name": r["name"],
+            "description": r["description"] or "",
+            "signature": signature,
+            "return_type": r["return_type"],
+            "return_type_ref": r["return_type_ref"],
+            "return_is_array": bool(r["return_is_array"]),
+            "element_type": r["element_type"],
+            "defined_in": r["class_name"],
+            "source": r["source"],
+        }
+        if r["es_only"]:
+            item["extendscript_only"] = True
+        result.append(_with_uxp(item, r["uxp_note"], runtime))
 
     conn.close()
     return result
@@ -234,7 +268,7 @@ def get_method_detail(
     clause, params = _source_clause(source)
     rows = conn.execute(
         f"""SELECT m.id, m.name, m.description, m.return_type, m.return_type_ref, m.return_is_array,
-                  m.element_type, src.key AS source
+                  m.element_type, m.es_only, m.uxp_note, src.key AS source
            FROM methods m
            JOIN classes c ON m.class_id = c.id
            JOIN sources src ON c.source_id = src.id
@@ -250,36 +284,45 @@ def get_method_detail(
     result = []
     for row in rows:
         param_rows = conn.execute(
-            """SELECT name, description, data_type, data_type_ref, is_array, is_optional, default_value
+            """SELECT name, description, data_type, data_type_ref, is_array, is_optional, default_value,
+                      min_value, max_value, measurement_unit
                FROM parameters
                WHERE method_id = ?
                ORDER BY sort_order""",
             (row["id"],),
         ).fetchall()
-        result.append(
-            {
-                "name": row["name"],
-                "class_name": class_name,
-                "source": row["source"],
-                "description": row["description"] or "",
-                "return_type": row["return_type"],
-                "return_type_ref": row["return_type_ref"],
-                "return_is_array": bool(row["return_is_array"]),
-                "element_type": row["element_type"],
-                "parameters": [
-                    {
-                        "name": p["name"],
-                        "description": p["description"] or "",
-                        "data_type": p["data_type"],
-                        "data_type_ref": p["data_type_ref"],
-                        "is_array": bool(p["is_array"]),
-                        "is_optional": bool(p["is_optional"]),
-                        "default_value": p["default_value"],
-                    }
-                    for p in param_rows
-                ],
-            }
-        )
+        signature_parts = [
+            f"{p['name']}{'?' if p['is_optional'] else ''}: {p['data_type'] or 'any'}" for p in param_rows
+        ]
+        item = {
+            "name": row["name"],
+            "class_name": class_name,
+            "source": row["source"],
+            "description": row["description"] or "",
+            "signature": f"({', '.join(signature_parts)}) -> {row['return_type'] or 'void'}",
+            "return_type": row["return_type"],
+            "return_type_ref": row["return_type_ref"],
+            "return_is_array": bool(row["return_is_array"]),
+            "element_type": row["element_type"],
+            "parameters": [
+                {
+                    "name": p["name"],
+                    "description": p["description"] or "",
+                    "data_type": p["data_type"],
+                    "data_type_ref": p["data_type_ref"],
+                    "is_array": bool(p["is_array"]),
+                    "is_optional": bool(p["is_optional"]),
+                    "default_value": p["default_value"],
+                    "min_value": p["min_value"],
+                    "max_value": p["max_value"],
+                    "measurement_unit": bool(p["measurement_unit"]),
+                }
+                for p in param_rows
+            ],
+        }
+        if row["es_only"]:
+            item["extendscript_only"] = True
+        result.append(_with_uxp(item, row["uxp_note"]))
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -289,7 +332,7 @@ def get_enum_values(enum_name: str, source: str | None = None, db_path: str | No
     conn = _connect(db_path)
     clause, params = _source_clause(source)
     rows = conn.execute(
-        f"""SELECT c.id, c.name, c.description, src.key AS source
+        f"""SELECT c.id, c.name, c.description, c.uxp_note, src.key AS source
             FROM classes c
             JOIN sources src ON c.source_id = src.id
             WHERE c.name = ? AND c.is_enum = 1{clause}
@@ -309,21 +352,20 @@ def get_enum_values(enum_name: str, source: str | None = None, db_path: str | No
                ORDER BY name""",
             (row["id"],),
         ).fetchall()
-        result.append(
-            {
-                "name": row["name"],
-                "source": row["source"],
-                "description": row["description"] or "",
-                "values": [
-                    {
-                        "name": v["name"],
-                        "description": v["description"] or "",
-                        "numeric_value": v["numeric_value"],
-                    }
-                    for v in values
-                ],
-            }
-        )
+        item = {
+            "name": row["name"],
+            "source": row["source"],
+            "description": row["description"] or "",
+            "values": [
+                {
+                    "name": v["name"],
+                    "description": v["description"] or "",
+                    "numeric_value": v["numeric_value"],
+                }
+                for v in values
+            ],
+        }
+        result.append(_with_uxp(item, row["uxp_note"]))
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -349,14 +391,15 @@ def get_hierarchy(class_name: str, source: str | None = None, db_path: str | Non
                 (class_name, row["id"]),
             ).fetchall()
         ]
-        result.append(
-            {
-                "class_name": class_name,
-                "source": row["source"],
-                "ancestors": ancestors,
-                "direct_subclasses": subclasses,
-            }
-        )
+        item = {
+            "class_name": class_name,
+            "source": row["source"],
+            "ancestors": ancestors,
+            "direct_subclasses": subclasses,
+        }
+        if row["collection_of"]:
+            item["collection_of"] = row["collection_of"]
+        result.append(item)
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -365,32 +408,45 @@ def search_dom(
     query: str,
     source: str | None = None,
     max_results: int = 20,
+    runtime: str | None = None,
     db_path: str | None = None,
 ) -> list[dict]:
-    """Full-text search across all entities."""
+    """Full-text search across all entities.
+
+    runtime='uxp' limits results to the InDesign DOM and drops the [] index accessor.
+    """
     conn = _connect(db_path)
-    fts_query = " ".join(f"{term}*" for term in query.split())
+    terms = [t.replace('"', "") for t in query.split()]
+    fts_query = " ".join(f'"{t}"*' for t in terms if t)
+    if not fts_query:
+        conn.close()
+        return []
 
+    sql = """SELECT entity_type, entity_name, parent_name, description, source, rank
+             FROM dom_search
+             WHERE dom_search MATCH ?"""
+    params: list = [fts_query]
     if source:
-        rows = conn.execute(
-            """SELECT entity_type, entity_name, parent_name, description, source, rank
-               FROM dom_search
-               WHERE dom_search MATCH ?
-                 AND source = ?
-               ORDER BY rank
-               LIMIT ?""",
-            (fts_query, source, max_results),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT entity_type, entity_name, parent_name, description, source, rank
-               FROM dom_search
-               WHERE dom_search MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (fts_query, max_results),
-        ).fetchall()
+        sql += " AND source = ?"
+        params.append(source)
+    elif runtime == "uxp":
+        sql += " AND source = 'dom'"
+    if runtime == "uxp":
+        sql += " AND NOT (entity_type = 'method' AND entity_name = '[]')"
+    sql += " ORDER BY rank LIMIT ?"
+    params.append(max_results)
 
+    rows = conn.execute(sql, params).fetchall()
+    if not rows and re.search(r"[^\w\s]", query):
+        # The FTS tokenizer drops symbols such as "$"; fall back to an exact name match.
+        sql = "SELECT entity_type, entity_name, parent_name, description, source FROM dom_search WHERE entity_name = ?"
+        params = [query.strip()]
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " LIMIT ?"
+        params.append(max_results)
+        rows = conn.execute(sql, params).fetchall()
     conn.close()
 
     return [
@@ -406,49 +462,46 @@ def search_dom(
 
 
 def list_classes(
-    suite: str | None = None,
     type_filter: str = "all",
     source: str | None = None,
+    filter_text: str | None = None,
     db_path: str | None = None,
 ) -> list[dict]:
-    """Class overview, filterable by suite/type/source."""
+    """Class overview, filterable by kind, source and name substring."""
     conn = _connect(db_path)
 
     query = """
-        SELECT c.name, c.is_enum, c.description, s.name AS suite_name, src.key AS source
+        SELECT c.name, c.kind, c.description, c.collection_of, src.key AS source
         FROM classes c
-        LEFT JOIN suites s ON c.suite_id = s.id
         JOIN sources src ON c.source_id = src.id
         WHERE 1=1
     """
     params: list = []
 
-    if suite:
-        query += " AND s.name = ?"
-        params.append(suite)
     if source:
         query += " AND src.key = ?"
         params.append(source)
-
-    if type_filter == "class":
-        query += " AND c.is_enum = 0"
-    elif type_filter == "enum":
-        query += " AND c.is_enum = 1"
+    query += CLASS_TYPE_FILTERS.get(type_filter, "")
+    if filter_text:
+        query += " AND c.name LIKE ?"
+        params.append(f"%{filter_text}%")
 
     query += " ORDER BY src.key, c.name"
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
-    return [
-        {
+    result = []
+    for r in rows:
+        item = {
             "name": r["name"],
-            "suite": r["suite_name"] or "",
-            "is_enum": bool(r["is_enum"]),
+            "kind": r["kind"],
             "description": (r["description"] or "")[:120],
             "source": r["source"],
         }
-        for r in rows
-    ]
+        if r["collection_of"]:
+            item["collection_of"] = r["collection_of"]
+        result.append(item)
+    return result
 
 
 def dom_info(db_path: str | None = None) -> dict:
@@ -456,17 +509,16 @@ def dom_info(db_path: str | None = None) -> dict:
     conn = _connect(db_path)
     meta = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM db_meta").fetchall()}
 
-    (suite_count,) = conn.execute("SELECT COUNT(*) FROM suites").fetchone()
-    (class_count,) = conn.execute("SELECT COUNT(*) FROM classes").fetchone()
-    (enum_count,) = conn.execute("SELECT COUNT(*) FROM classes WHERE is_enum = 1").fetchone()
-    (prop_count,) = conn.execute("SELECT COUNT(*) FROM properties").fetchone()
-    (method_count,) = conn.execute("SELECT COUNT(*) FROM methods").fetchone()
-    (param_count,) = conn.execute("SELECT COUNT(*) FROM parameters").fetchone()
+    counts = {}
+    for table in ("classes", "properties", "methods", "parameters", "events"):
+        (counts[table],) = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    for kind in ("object", "collection", "enum"):
+        (counts[f"{kind}s"],) = conn.execute("SELECT COUNT(*) FROM classes WHERE kind = ?", (kind,)).fetchone()
     source_rows = conn.execute(
-        """SELECT src.key AS source, COUNT(c.id) AS class_count
+        """SELECT src.key AS source, src.version, src.generated, COUNT(c.id) AS class_count
            FROM sources src
            LEFT JOIN classes c ON c.source_id = src.id
-           GROUP BY src.key
+           GROUP BY src.id
            ORDER BY src.key"""
     ).fetchall()
     conn.close()
@@ -474,21 +526,18 @@ def dom_info(db_path: str | None = None) -> dict:
     return {
         "dom_version": meta.get("dom_version", ""),
         "dom_title": meta.get("dom_title", ""),
-        "source_file": meta.get("source_file", ""),
+        "dom_target": meta.get("dom_target", ""),
+        "dom_generated": meta.get("dom_generated", ""),
+        "source_origin": meta.get("source_origin", ""),
         "source_files": meta.get("source_files", ""),
         "source_keys": meta.get("source_keys", ""),
         "build_timestamp": meta.get("build_timestamp", ""),
         "parser_version": meta.get("parser_version", ""),
-        "sources": [{"source": r["source"], "class_count": r["class_count"]} for r in source_rows],
-        "counts": {
-            "suites": suite_count,
-            "classes": class_count,
-            "enums": enum_count,
-            "regular_classes": class_count - enum_count,
-            "properties": prop_count,
-            "methods": method_count,
-            "parameters": param_count,
-        },
+        "sources": [
+            {"source": r["source"], "version": r["version"], "generated": r["generated"], "class_count": r["class_count"]}
+            for r in source_rows
+        ],
+        "counts": counts,
     }
 
 
@@ -496,44 +545,60 @@ def list_sources(db_path: str | None = None) -> list[dict]:
     """List available sources with entity counts."""
     conn = _connect(db_path)
     rows = conn.execute(
-        """SELECT src.key AS source, src.label, src.file,
-                  COUNT(DISTINCT c.id) AS classes,
-                  COUNT(DISTINCT p.id) AS properties,
-                  COUNT(DISTINCT m.id) AS methods
+        """SELECT src.key AS source, src.label, src.url, src.version, src.title, src.generated, src.uxp_note,
+                  (SELECT COUNT(*) FROM classes c WHERE c.source_id = src.id) AS classes,
+                  (SELECT COUNT(*) FROM properties p JOIN classes c ON p.class_id = c.id
+                    WHERE c.source_id = src.id) AS properties,
+                  (SELECT COUNT(*) FROM methods m JOIN classes c ON m.class_id = c.id
+                    WHERE c.source_id = src.id) AS methods
            FROM sources src
-           LEFT JOIN classes c ON c.source_id = src.id
-           LEFT JOIN properties p ON p.class_id = c.id
-           LEFT JOIN methods m ON m.class_id = c.id
-           GROUP BY src.id
            ORDER BY src.key"""
     ).fetchall()
     conn.close()
-    return [
-        {
+    result = []
+    for r in rows:
+        item = {
             "source": r["source"],
             "label": r["label"],
-            "file": r["file"] or "",
+            "url": r["url"] or "",
+            "version": r["title"] or r["version"] or "",
+            "generated": r["generated"] or "",
             "counts": {
                 "classes": r["classes"],
                 "properties": r["properties"],
                 "methods": r["methods"],
             },
         }
-        for r in rows
-    ]
+        result.append(_with_uxp(item, r["uxp_note"]))
+    return result
 
 
 def knowledge_overview(db_path: str | None = None) -> dict:
     """Return capability overview for multi-source scripting lookups."""
+    info = dom_info(db_path=db_path)
     return {
+        "dom_version": info["dom_title"] or info["dom_version"],
+        "dom_generated": info["dom_generated"],
+        "source_origin": info["source_origin"],
         "sources": list_sources(db_path=db_path),
         "extendscript_specials": ["$", "UnitValue", "File", "Folder", "Socket", "XML", "XMLList", "RegExp"],
         "scriptui_note": (
             "ScriptUI is legacy technology. Prefer UXP for new UI development. "
             "ScriptUI documentation remains useful for small dialogs and maintaining existing scripts."
         ),
+        "runtime_note": (
+            "The InDesign DOM is shared by ExtendScript and UXP. Entries carrying 'uxp_note' behave differently "
+            "in UXP; 'extendscript_only' methods (e.g. the [] index accessor) do not exist in UXP. "
+            "Pass runtime='uxp' to get_methods/search_dom to hide them. In UXP compare enum values with equals(); "
+            "File/Folder are async entries from require('uxp').storage.localFileSystem. "
+            "Sources 'javascript' and 'scriptui' are ExtendScript only."
+        ),
+        "online_docs": (
+            "Every class has a Markdown page at doc_url (indesignjs.de by Gregor Fellenz) for long-form reading."
+        ),
         "lookup_order": ["knowledge_overview", "search_dom(source=...)", "lookup_class(source=...)", "indesign-exec.run_jsx"],
-        "known_name_collisions": ["Window", "Group", "Panel", "Event"],
+        "known_name_collisions": ["Window", "Button", "Event", "Events", "Group", "ListBox", "Panel", "RadioButton",
+                                  "StaticText"],
     }
 
 

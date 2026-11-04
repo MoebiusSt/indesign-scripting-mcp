@@ -1,12 +1,16 @@
 """
 InDesign DOM MCP – CLI Management Tool.
 
+Data source: https://www.indesignjs.de/indesignapi/ (api.json per target, by Gregor Fellenz).
+
 Commands:
-  analyze   --xml <file>     Structure report from XML
-  build     --xml <file>     Build new database from XML
-  build-all --dom --js --sui Build multi-source database
-  update    --xml <file>     Update database (diff + rebuild)
-  validate  [--xml <file>]   Validate database against XML
+  check                     Compare upstream versions (llms.txt, ~2 KB) with the database
+  fetch                     Download api.json for dom/javascript/scriptui into sources/indesignjs/
+  analyze                   Structure report from the downloaded api.json files
+  build                     Build database from the downloaded api.json files
+  update                    check + fetch + diff against current database + build
+  check-uxp                 Report UXP markers on the HTML pages not covered by rules/uxp_notes.json
+  validate                  Validate database (optionally against the api.json files)
   serve                     Start MCP server
   info                      Show database statistics
   review-submissions        Promote pending learnings to gotchas.json
@@ -27,8 +31,11 @@ import db as dom_db
 BASE_DIR = Path(__file__).parent
 DEFAULT_DB = BASE_DIR / "extendscript.db"
 LEGACY_DB = BASE_DIR / "indesign_dom.db"
+SOURCES_DIR = BASE_DIR / "sources" / "indesignjs"
+ARCHIVE_PATH = BASE_DIR / "sources" / "indesignapi.zip"
 GOTCHAS_PATH = BASE_DIR / "gotchas.json"
 SUBMISSIONS_PATH = BASE_DIR / "submissions" / "pending.jsonl"
+EXPECTED_SOURCES = list(dom_parser.DEFAULT_TARGETS)
 
 
 def _default_db_path() -> Path:
@@ -36,281 +43,268 @@ def _default_db_path() -> Path:
     return DEFAULT_DB
 
 
-def cmd_analyze(args):
-    """Analyze XML structure and print report."""
-    xml_path = args.xml
-    if not os.path.exists(xml_path):
-        print(f"Error: XML file not found: {xml_path}")
-        return 1
+def _target_dbs(args) -> list[str]:
+    """Databases to write: --db, or the default plus the legacy file if it exists."""
+    if getattr(args, "db", None):
+        return [args.db]
+    targets = [str(DEFAULT_DB)]
+    if LEGACY_DB.exists():
+        targets.append(str(LEGACY_DB))
+    return targets
 
-    source_key = args.source
-    print(f"Parsing {xml_path} (source={source_key}) ...")
-    data = dom_parser.parse_xml(xml_path, source_key=source_key)
-    stats = dom_parser.analyze(data, xml_path)
-    dom_parser.print_report(stats)
+
+def _sources_dir(args) -> Path:
+    return Path(args.dir) if getattr(args, "dir", None) else SOURCES_DIR
+
+
+def _parse_local(sources_dir: Path) -> list[dict] | None:
+    paths = dom_parser.local_source_paths(str(sources_dir))
+    missing = [p for _, p in paths if not os.path.exists(p)]
+    if missing:
+        print(f"Error: api.json not found: {', '.join(missing)}")
+        print("Run 'manage.py fetch' first.")
+        return None
+    print(f"Parsing {sources_dir} ...")
+    return dom_parser.parse_sources(paths)
+
+
+def _remote_status(db_path: str) -> tuple[bool, list[str]]:
+    """Return (up_to_date, report lines) by comparing upstream llms.txt with db_meta."""
+    remote = dom_parser.fetch_remote_versions()
+    meta = {}
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            rows = dict(conn.execute("SELECT key, value FROM db_meta").fetchall())
+            conn.close()
+            meta = {"title": rows.get("dom_title", ""), "generated": rows.get("dom_generated", "")}
+        except sqlite3.Error:
+            meta = {}
+    dom_line = remote["targets"].get(dom_parser.DEFAULT_TARGETS["dom"], "")
+    lines = [
+        f"  Upstream:  {dom_line or '(dom target missing in llms.txt)'}",
+        f"             generated {remote['generated'] or '?'}",
+        f"  Database:  {meta.get('title') or '(none)'}",
+        f"             generated {meta.get('generated') or '?'}",
+    ]
+    up_to_date = bool(meta.get("title")) and meta["title"] in dom_line and meta.get("generated") == remote["generated"]
+    return up_to_date, lines
+
+
+def cmd_check(args):
+    """Compare upstream versions with the database without downloading api.json."""
+    up_to_date, lines = _remote_status(str(_target_dbs(args)[0]))
+    print("\n".join(lines))
+    print("  Status:    " + ("up to date" if up_to_date else "update available (run 'manage.py update')"))
     return 0
 
 
-def cmd_build(args):
-    """Build database from XML."""
-    xml_path = args.xml
-    db_path = args.db or str(_default_db_path())
-    source_key = args.source
+def cmd_fetch(args):
+    """Download api.json for every source."""
+    dest = _sources_dir(args)
+    print(f"Downloading api.json files into {dest} ...")
+    for source_key, path in dom_parser.fetch_sources(str(dest)):
+        size = os.path.getsize(path) / 1e6
+        print(f"  {source_key:<11} {path} ({size:.1f} MB)")
+    return 0
 
-    if not os.path.exists(xml_path):
-        print(f"Error: XML file not found: {xml_path}")
+
+def cmd_analyze(args):
+    """Analyze downloaded api.json files and print report."""
+    parsed = _parse_local(_sources_dir(args))
+    if parsed is None:
         return 1
-
-    print(f"Parsing {xml_path} (source={source_key}) ...")
-    data = dom_parser.parse_xml(xml_path, source_key=source_key)
-
-    # Analysis report
-    stats = dom_parser.analyze(data, xml_path)
-    dom_parser.print_report(stats)
-
-    # Build DB
-    print(f"\nBuilding database at {db_path} ...")
-    build_stats = dom_parser.build_database(data, db_path, xml_path)
-    print(f"  Classes:    {build_stats['class_count']}")
-    print(f"  Properties: {build_stats['property_count']}")
-    print(f"  Methods:    {build_stats['method_count']}")
-    print(f"  Parameters: {build_stats['parameter_count']}")
-    print(f"  FTS rows:   {build_stats['fts_rows']}")
-    print(f"  Built at:   {build_stats['build_timestamp']}")
-
-    # Validate
-    print("\nValidating ...")
-    passed, messages = dom_parser.validate(data, db_path)
-    dom_parser.print_validation(passed, messages)
-
-    if passed:
-        print("\nDatabase built successfully.")
-    else:
-        print("\nDatabase built with validation errors.")
-
-    return 0 if passed else 1
+    for data in parsed:
+        if args.source and data["source_key"] != args.source:
+            continue
+        dom_parser.print_report(dom_parser.analyze(data))
+    return 0
 
 
-def cmd_build_all(args):
-    """Build database from DOM + JavaScript + ScriptUI XML sources."""
-    db_path = args.db or str(_default_db_path())
-    xml_sources = [
-        ("dom", args.dom),
-        ("javascript", args.js),
-        ("scriptui", args.sui),
-    ]
+def _build(parsed: list[dict], db_paths: list[str]) -> int:
+    for data in parsed:
+        dom_parser.print_report(dom_parser.analyze(data))
 
-    for source_key, xml_path in xml_sources:
-        if not os.path.exists(xml_path):
-            print(f"Error: XML file not found for source '{source_key}': {xml_path}")
-            return 1
+    passed_all = True
+    for db_path in db_paths:
+        print(f"\nBuilding database at {db_path} ...")
+        try:
+            stats = dom_parser.build_database(parsed, db_path)
+        except PermissionError as exc:
+            print(f"Error: cannot replace {db_path} ({exc}). Stop the MCP server using it and retry.")
+            passed_all = False
+            continue
+        print(f"  Sources:    {stats['source_count']}")
+        print(f"  Classes:    {stats['class_count']}")
+        print(f"  Properties: {stats['property_count']}")
+        print(f"  Methods:    {stats['method_count']}")
+        print(f"  Parameters: {stats['parameter_count']}")
+        print(f"  Events:     {stats['event_count']}")
+        print(f"  FTS rows:   {stats['fts_rows']}")
+        print(f"  Built at:   {stats['build_timestamp']}")
 
-    parsed_sources = []
-    for source_key, xml_path in xml_sources:
-        print(f"Parsing {xml_path} (source={source_key}) ...")
-        data = dom_parser.parse_xml(xml_path, source_key=source_key)
-        parsed_sources.append(data)
-        stats = dom_parser.analyze(data, xml_path)
-        dom_parser.print_report(stats)
+        passed, messages = dom_parser.validate(parsed, db_path, expect_sources=EXPECTED_SOURCES)
+        dom_parser.print_validation(passed, messages)
+        passed = _run_regression_checks(db_path) and passed
+        passed_all = passed_all and passed
+    return 0 if passed_all else 1
 
-    print(f"\nBuilding multi-source database at {db_path} ...")
-    build_stats = dom_parser.build_database(parsed_sources, db_path)
-    print(f"  Sources:    {build_stats['source_count']}")
-    print(f"  Classes:    {build_stats['class_count']}")
-    print(f"  Properties: {build_stats['property_count']}")
-    print(f"  Methods:    {build_stats['method_count']}")
-    print(f"  Parameters: {build_stats['parameter_count']}")
-    print(f"  FTS rows:   {build_stats['fts_rows']}")
-    print(f"  Built at:   {build_stats['build_timestamp']}")
 
-    print("\nValidating ...")
-    passed, messages = dom_parser.validate(parsed_sources, db_path, expect_sources=["dom", "javascript", "scriptui"])
-    dom_parser.print_validation(passed, messages)
-    return 0 if passed else 1
+def cmd_build(args):
+    """Build database from downloaded api.json files."""
+    parsed = _parse_local(_sources_dir(args))
+    if parsed is None:
+        return 1
+    return _build(parsed, _target_dbs(args))
 
 
 def cmd_update(args):
-    """Update database from new XML (diff + rebuild)."""
-    xml_path = args.xml
-    db_path = args.db or str(_default_db_path())
-    source_key = args.source
+    """Check upstream, fetch, show diff against the current database and rebuild."""
+    db_paths = _target_dbs(args)
+    if not args.force:
+        up_to_date, lines = _remote_status(db_paths[0])
+        print("\n".join(lines))
+        if up_to_date:
+            print("Database is up to date. Use --force to rebuild anyway.")
+            return 0
 
-    if not os.path.exists(xml_path):
-        print(f"Error: XML file not found: {xml_path}")
+    rc = cmd_fetch(args)
+    if rc:
+        return rc
+    parsed = _parse_local(_sources_dir(args))
+    if parsed is None:
         return 1
-
-    # Parse new XML
-    print(f"Parsing {xml_path} (source={source_key}) ...")
-    new_data = dom_parser.parse_xml(xml_path, source_key=source_key)
-
-    # If DB exists, show diff
-    if os.path.exists(db_path):
-        _print_diff(db_path, new_data)
-    else:
-        print("No existing database found. Building fresh.")
-
-    # Rebuild
-    print(f"\nRebuilding database at {db_path} ...")
-    build_stats = dom_parser.build_database(new_data, db_path, xml_path)
-
-    print(f"  Classes:    {build_stats['class_count']}")
-    print(f"  Properties: {build_stats['property_count']}")
-    print(f"  Methods:    {build_stats['method_count']}")
-    print(f"  Parameters: {build_stats['parameter_count']}")
-
-    # Validate
-    print("\nValidating ...")
-    passed, messages = dom_parser.validate(new_data, db_path)
-    dom_parser.print_validation(passed, messages)
-
-    if passed:
-        print("\nDatabase updated successfully.")
-    else:
-        print("\nDatabase updated with validation errors.")
-
-    return 0 if passed else 1
+    if os.path.exists(db_paths[0]):
+        _print_diff(db_paths[0], next(p for p in parsed if p["source_key"] == "dom"))
+    return _build(parsed, db_paths)
 
 
-def _print_diff(db_path: str, new_data: dict):
-    """Print diff between existing DB and new XML data."""
-    sep = "=" * 55
+def _db_members(conn: sqlite3.Connection, source_key: str) -> dict[str, set[str]]:
+    members: dict[str, set[str]] = {}
+    for (name,) in conn.execute(
+        "SELECT c.name FROM classes c JOIN sources s ON s.id = c.source_id WHERE s.key = ?", (source_key,)
+    ):
+        members[name] = set()
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    queries = [("properties", "p.name"), ("methods", "p.name || '()'")]
+    if "events" in tables:
+        queries.append(("events", "'event:' || p.name"))
+    for table, expr in queries:
+        for cls, member in conn.execute(
+            f"""SELECT c.name, {expr} FROM {table} p
+                JOIN classes c ON c.id = p.class_id JOIN sources s ON s.id = c.source_id
+                WHERE s.key = ?""",
+            (source_key,),
+        ):
+            members.setdefault(cls, set()).add(member)
+    return members
 
-    try:
-        old_info = dom_db.dom_info(db_path=db_path)
-    except Exception:
-        print("Could not read existing database for diff.")
-        return
 
-    old_version = old_info.get("dom_version", "?")
-    new_version = new_data["version"]
-
-    # Get old class names
+def _print_diff(db_path: str, new_data: dict, limit: int = 25):
+    """Print class- and member-level diff between existing DB and the new DOM payload."""
+    sep = "=" * 60
     try:
         conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        old_classes = {
-            r["name"]
-            for r in conn.execute("SELECT name FROM classes").fetchall()
-        }
-        old_enums = {
-            r["name"]
-            for r in conn.execute("SELECT name FROM classes WHERE is_enum = 1").fetchall()
-        }
-        old_counts = old_info.get("counts", {})
+        old_info = dict(conn.execute("SELECT key, value FROM db_meta").fetchall())
+        old = _db_members(conn, new_data["source_key"])
         conn.close()
-    except Exception:
-        print("Could not read existing database for diff.")
+    except Exception as exc:
+        print(f"Could not read existing database for diff: {exc}")
         return
 
-    new_classes = {c["name"] for c in new_data["classes"]}
-    new_enums = {c["name"] for c in new_data["classes"] if c["is_enum"]}
-
-    added_classes = new_classes - old_classes
-    removed_classes = old_classes - new_classes
-    added_enums = new_enums - old_enums
-
-    new_prop_count = sum(len(c["properties"]) for c in new_data["classes"])
-    new_meth_count = sum(len(c["methods"]) for c in new_data["classes"])
-
-    old_prop_count = old_counts.get("properties", 0)
-    old_meth_count = old_counts.get("methods", 0)
-
-    prop_diff = new_prop_count - old_prop_count
-    meth_diff = new_meth_count - old_meth_count
+    new = {
+        c["name"]: {p["name"] for p in c["properties"]}
+        | {f"{m['name']}()" for m in c["methods"]}
+        | {f"event:{e['name']}" for e in c["events"]}
+        for c in new_data["classes"]
+    }
+    common = set(new) & set(old)
+    sections = (
+        ("New classes", sorted(set(new) - set(old))),
+        ("Removed classes", sorted(set(old) - set(new))),
+        ("New members", sorted(f"{c}.{m}" for c in common for m in new[c] - old[c])),
+        ("Removed members", sorted(f"{c}.{m}" for c in common for m in old[c] - new[c])),
+    )
 
     print(sep)
-    print(f"  DOM Update: {old_version} -> {new_version}")
+    print(f"  DOM Update: {old_info.get('dom_title') or old_info.get('dom_version', '?')}")
+    print(f"           -> {new_data['title']}")
+    print(sep)
+    for label, items in sections:
+        print(f"  {label + ':':<17} {len(items):>5}")
+        for item in items[:limit]:
+            print(f"      {item}")
+        if len(items) > limit:
+            print(f"      ... (+{len(items) - limit})")
     print(sep)
 
-    if added_classes:
-        names = ", ".join(sorted(added_classes)[:10])
-        if len(added_classes) > 10:
-            names += ", ..."
-        print(f"  New classes:      +{len(added_classes):>3}   ({names})")
-    else:
-        print(f"  New classes:      +  0")
 
-    if removed_classes:
-        names = ", ".join(sorted(removed_classes)[:10])
-        if len(removed_classes) > 10:
-            names += ", ..."
-        print(f"  Removed classes:  -{len(removed_classes):>3}   ({names})")
-    else:
-        print(f"  Removed classes:  -  0")
+def cmd_check_uxp(args):
+    """Compare Gregor's rendered UXP markers with the UXP data in the database."""
+    db_path = args.db or str(_default_db_path())
+    archive = Path(args.archive) if args.archive else ARCHIVE_PATH
+    if args.download or not archive.exists():
+        print(f"Downloading {dom_parser.ARCHIVE_URL} ...")
+        dom_parser.download_archive(str(archive))
+    print(f"Scanning {archive} ...")
+    markers = dom_parser.scan_uxp_markers(str(archive), dom_parser.DEFAULT_TARGETS["dom"])
 
-    # Modified classes: classes present in both but potentially different
-    common = old_classes & new_classes
-    print(f"  Common classes:   {len(common):>5}")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    rows = conn.execute(
+        """SELECT c.name, c.uxp_note FROM classes c JOIN sources s ON s.id = c.source_id WHERE s.key = 'dom'"""
+    ).fetchall()
+    class_notes = {name: note for name, note in rows}
+    covered = {}
+    for kind, query in (
+        ("p", "SELECT c.name, p.name, p.uxp_note IS NOT NULL, 0 FROM properties p"),
+        ("m", "SELECT c.name, p.name, p.uxp_note IS NOT NULL, p.es_only FROM methods p"),
+    ):
+        for cls, member, has_note, es_only in conn.execute(
+            query + " JOIN classes c ON c.id = p.class_id JOIN sources s ON s.id = c.source_id WHERE s.key = 'dom'"
+        ):
+            covered[(cls, kind, member)] = (bool(has_note), bool(es_only))
+    conn.close()
 
-    if added_enums:
-        print(f"  New enums:        +{len(added_enums):>3}")
+    gaps = []
+    for cls, data in sorted(markers.items()):
+        if data["class_note"] and not class_notes.get(cls):
+            gaps.append(f"{cls}: class note missing - {data['class_note']}")
+        for (kind, member), entry in sorted(data["members"].items()):
+            has_note, es_only = covered.get((cls, kind, member), (False, False))
+            if entry["hidden"] and not es_only:
+                gaps.append(f"{cls}.{member}: hidden under UXP but not marked es_only")
+            if (entry["note"] or entry["async"]) and not has_note:
+                text = entry["note"] or "async File/Folder entry"
+                gaps.append(f"{cls}.{member}: UXP note missing - {text}")
 
-    sign_p = "+" if prop_diff >= 0 else ""
-    sign_m = "+" if meth_diff >= 0 else ""
-    print(f"  Properties delta: {sign_p}{prop_diff}")
-    print(f"  Methods delta:    {sign_m}{meth_diff}")
-    print(sep)
+    print(f"  Pages with UXP markers: {len(markers)}")
+    if not gaps:
+        print("  All UXP markers are covered by parser rules and uxp_notes.json.")
+        return 0
+    print(f"  Uncovered markers: {len(gaps)} (add them to uxp_notes.json or extend the rules)")
+    for line in gaps:
+        print(f"    {line}")
+    return 1
 
 
 def cmd_validate(args):
-    """Validate database against XML."""
+    """Validate database, optionally against the downloaded api.json files."""
     db_path = args.db or str(_default_db_path())
-    xml_path = args.xml
-    expect_sources = args.expect_sources.split(",") if args.expect_sources else None
+    expect_sources = args.expect_sources.split(",") if args.expect_sources else EXPECTED_SOURCES
 
     if not os.path.exists(db_path):
         print(f"Error: Database not found: {db_path}")
         return 1
 
-    if xml_path:
-        if not os.path.exists(xml_path):
-            print(f"Error: XML file not found: {xml_path}")
-            return 1
-        source_key = args.source
-        print(f"Parsing {xml_path} for validation (source={source_key}) ...")
-        data = dom_parser.parse_xml(xml_path, source_key=source_key)
-    else:
-        print("Validating database structure (no XML comparison) ...")
-        conn = sqlite3.connect(db_path)
-        tables = [
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        ]
-        conn.close()
-
-        expected = {"db_meta", "sources", "suites", "classes", "properties", "methods", "parameters", "dom_search"}
-        missing = expected - set(tables)
-        if missing:
-            print(f"FAIL: Missing tables: {missing}")
+    parsed = None
+    if args.dir:
+        parsed = _parse_local(Path(args.dir))
+        if parsed is None:
             return 1
 
-        if expect_sources:
-            conn = sqlite3.connect(db_path)
-            found_sources = {r[0] for r in conn.execute("SELECT key FROM sources").fetchall()}
-            conn.close()
-            missing_sources = set(expect_sources) - found_sources
-            if missing_sources:
-                print(f"FAIL: Missing sources: {sorted(missing_sources)}")
-                return 1
-
-        info = dom_db.dom_info(db_path=db_path)
-        print(f"  Version:    {info['dom_version']}")
-        print(f"  Title:      {info['dom_title']}")
-        print(f"  Source:     {info['source_file']}")
-        print(f"  Built:      {info['build_timestamp']}")
-        print(f"  Classes:    {info['counts']['classes']}")
-        print(f"  Properties: {info['counts']['properties']}")
-        print(f"  Methods:    {info['counts']['methods']}")
-
-        _run_regression_checks(db_path)
-        print("  Structure validation: [OK] PASSED")
-        return 0
-
-    passed, messages = dom_parser.validate(data, db_path, expect_sources=expect_sources)
+    passed, messages = dom_parser.validate(parsed, db_path, expect_sources=expect_sources)
     dom_parser.print_validation(passed, messages)
-    _run_regression_checks(db_path)
+    passed = _run_regression_checks(db_path) and passed
     return 0 if passed else 1
 
 
@@ -320,14 +314,13 @@ def cmd_serve(args):
 
     if not os.path.exists(db_path):
         print(f"Error: Database not found: {db_path}")
-        print("Run 'manage.py build --xml <file>' first.")
+        print("Run 'manage.py update' first.")
         return 1
 
-    # Set DB path as environment variable for server
     os.environ["EXTENDSCRIPT_DB"] = db_path
     os.environ["INDESIGN_DOM_DB"] = db_path
 
-    print(f"Starting InDesign DOM MCP Server ...")
+    print("Starting InDesign DOM MCP Server ...")
     print(f"  Database: {db_path}")
 
     import server
@@ -345,49 +338,76 @@ def cmd_info(args):
 
     info = dom_db.dom_info(db_path=db_path)
 
-    sep = "=" * 55
+    sep = "=" * 60
     print(sep)
-    print(f"  InDesign DOM Database Info")
+    print("  InDesign DOM Database Info")
     print(sep)
-    print(f"  Version:        {info['dom_version']}")
-    print(f"  Title:          {info['dom_title']}")
-    print(f"  Source file:    {info['source_file']}")
-    print(f"  Source files:   {info['source_files']}")
+    print(f"  Origin:         {info['source_origin']}")
+    print(f"  DOM:            {info['dom_title']} (generated {info['dom_generated']})")
+    for src in info["sources"]:
+        print(f"  {src['source']:<14}  {src['version']} ({src['generated']})")
     print(f"  Built:          {info['build_timestamp']}")
     print(f"  Parser version: {info['parser_version']}")
     print(sep)
     counts = info["counts"]
-    print(f"  Suites:           {counts['suites']:>6}")
     print(f"  Classes (total):  {counts['classes']:>6}")
-    print(f"    Regular:        {counts['regular_classes']:>6}")
+    print(f"    Objects:        {counts['objects']:>6}")
+    print(f"    Collections:    {counts['collections']:>6}")
     print(f"    Enumerations:   {counts['enums']:>6}")
     print(f"  Properties:       {counts['properties']:>6}")
     print(f"  Methods:          {counts['methods']:>6}")
     print(f"  Parameters:       {counts['parameters']:>6}")
+    print(f"  Events:           {counts['events']:>6}")
     print(sep)
     return 0
 
 
-def _run_regression_checks(db_path: str):
+def _run_regression_checks(db_path: str) -> bool:
     """Run sample queries for quick regression coverage."""
-    checks = [
+    results = []
+
+    def check(label: str, ok: bool):
+        results.append(ok)
+        print(f"    {'OK' if ok else 'FAIL'}: {label}")
+
+    print("  Regression checks:")
+    for class_name, source in (
+        ("TextFrame", "dom"),
+        ("Index", "dom"),
         ("UnitValue", "javascript"),
         ("$", "javascript"),
         ("File", "javascript"),
         ("RegExp", "javascript"),
         ("ScriptUI", "scriptui"),
-    ]
-    print("  Regression checks:")
-    for class_name, source in checks:
-        row = dom_db.lookup_class(class_name, source=source, db_path=db_path)
-        status = "OK" if row else "FAIL"
-        print(f"    {status}: lookup_class('{class_name}', source='{source}')")
-    collision = dom_db.lookup_class("Window", db_path=db_path)
-    if isinstance(collision, list) and len(collision) >= 2:
-        print("    OK: lookup_class('Window') resolves multiple sources")
-    else:
-        print("    FAIL: lookup_class('Window') should return multiple sources")
+    ):
+        check(f"lookup_class('{class_name}', source='{source}')",
+              bool(dom_db.lookup_class(class_name, source=source, db_path=db_path)))
 
+    collision = dom_db.lookup_class("Window", db_path=db_path)
+    check("lookup_class('Window') resolves dom + scriptui", isinstance(collision, list) and len(collision) >= 2)
+
+    open_dialog = dom_db.get_methods("File", source="javascript", filter_text="openDialog", db_path=db_path)
+    check("File.openDialog is static", any(m["element_type"] == "class" for m in open_dialog))
+
+    def has_index_accessor(runtime):
+        methods = dom_db.get_methods("TextFrames", source="dom", runtime=runtime, db_path=db_path)
+        return any(m["name"] == "[]" for m in methods)
+
+    check("TextFrames has '[]' (extendscript), not under runtime='uxp'",
+          has_index_accessor(None) and not has_index_accessor("uxp"))
+
+    justification = dom_db.get_enum_values("Justification", source="dom", db_path=db_path) or {}
+    check("Justification has values and uxp_note", bool(justification.get("values")) and "uxp_note" in justification)
+
+    full_name = dom_db.get_properties("Document", source="dom", filter_text="fullName", db_path=db_path)
+    check("Document.fullName has async uxp_note", any("uxp_note" in p for p in full_name))
+
+    try:
+        dollar = dom_db.search_dom("$", db_path=db_path)
+        check("search_dom('$') finds the $ class", any(r["entity_name"] == "$" for r in dollar))
+    except sqlite3.Error:
+        check("search_dom('$') finds the $ class", False)
+    return all(results)
 
 def _slugify(text: str) -> str:
     """Build a stable slug for gotcha IDs."""
@@ -540,17 +560,20 @@ def cmd_review_submissions(args):
     return 0
 
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="InDesign DOM MCP – Management CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  analyze   --xml <file>     Analyze XML structure
-  build     --xml <file>     Build new database
-  build-all --dom --js --sui Build multi-source database
-  update    --xml <file>     Update database (diff + rebuild)
-  validate  [--xml <file>]   Validate database
+  check                     Compare upstream versions with the database
+  fetch                     Download api.json files into sources/indesignjs/
+  analyze                   Analyze the downloaded api.json files
+  build                     Build database from the downloaded api.json files
+  update                    check + fetch + diff + build
+  check-uxp                 Report UXP markers not covered by rules/uxp_notes.json
+  validate                  Validate database
   serve                     Start MCP server
   info                      Show database statistics
   review-submissions        Promote pending learnings to gotchas.json
@@ -558,67 +581,44 @@ Commands:
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    dir_help = f"Folder with <target>/api.json (default: {SOURCES_DIR})"
+    db_help = f"Database path (default: {DEFAULT_DB.name}, plus {LEGACY_DB.name} if present)"
 
-    # analyze
-    p_analyze = subparsers.add_parser("analyze", help="Analyze XML structure")
-    p_analyze.add_argument("--xml", required=True, help="Path to OMV-XML file")
-    p_analyze.add_argument(
-        "--source",
-        default="dom",
-        choices=["dom", "javascript", "scriptui"],
-        help="Source key for this XML file",
-    )
+    p_check = subparsers.add_parser("check", help="Compare upstream versions with the database")
+    p_check.add_argument("--db", help=db_help)
 
-    # build
-    p_build = subparsers.add_parser("build", help="Build new database from XML")
-    p_build.add_argument("--xml", required=True, help="Path to OMV-XML file")
-    p_build.add_argument(
-        "--source",
-        default="dom",
-        choices=["dom", "javascript", "scriptui"],
-        help="Source key for this XML file",
-    )
-    p_build.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_fetch = subparsers.add_parser("fetch", help="Download api.json files")
+    p_fetch.add_argument("--dir", help=dir_help)
 
-    # build-all
-    p_build_all = subparsers.add_parser("build-all", help="Build database from DOM+JavaScript+ScriptUI XML")
-    p_build_all.add_argument("--dom", required=True, help="Path to InDesign DOM OMV XML")
-    p_build_all.add_argument("--js", required=True, help="Path to javascript.xml")
-    p_build_all.add_argument("--sui", required=True, help="Path to scriptui.xml")
-    p_build_all.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_analyze = subparsers.add_parser("analyze", help="Analyze downloaded api.json files")
+    p_analyze.add_argument("--dir", help=dir_help)
+    p_analyze.add_argument("--source", choices=EXPECTED_SOURCES, help="Only this source")
 
-    # update
-    p_update = subparsers.add_parser("update", help="Update database from new XML")
-    p_update.add_argument("--xml", required=True, help="Path to new OMV-XML file")
-    p_update.add_argument(
-        "--source",
-        default="dom",
-        choices=["dom", "javascript", "scriptui"],
-        help="Source key for this XML file",
-    )
-    p_update.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_build = subparsers.add_parser("build", help="Build database from downloaded api.json files")
+    p_build.add_argument("--dir", help=dir_help)
+    p_build.add_argument("--db", help=db_help)
 
-    # validate
+    p_update = subparsers.add_parser("update", help="Check, fetch, diff and rebuild")
+    p_update.add_argument("--dir", help=dir_help)
+    p_update.add_argument("--db", help=db_help)
+    p_update.add_argument("--force", action="store_true", help="Rebuild even if the database is up to date")
+
+    p_uxp = subparsers.add_parser("check-uxp", help="Report UXP markers not covered by rules/uxp_notes.json")
+    p_uxp.add_argument("--archive", help=f"indesignapi.zip or unpacked folder (default: {ARCHIVE_PATH})")
+    p_uxp.add_argument("--download", action="store_true", help="Download a fresh indesignapi.zip (~19 MB)")
+    p_uxp.add_argument("--db", help=f"Database path (default: {DEFAULT_DB.name})")
+
     p_validate = subparsers.add_parser("validate", help="Validate database")
-    p_validate.add_argument("--xml", help="Path to OMV-XML file (optional)")
-    p_validate.add_argument(
-        "--source",
-        default="dom",
-        choices=["dom", "javascript", "scriptui"],
-        help="Source key for XML validation mode",
-    )
-    p_validate.add_argument("--expect-sources", help="Comma-separated expected sources (e.g. dom,javascript,scriptui)")
-    p_validate.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_validate.add_argument("--dir", help="Compare counts against the api.json files in this folder")
+    p_validate.add_argument("--expect-sources", help="Comma-separated expected sources (default: dom,javascript,scriptui)")
+    p_validate.add_argument("--db", help=f"Database path (default: {DEFAULT_DB.name})")
 
-    # serve
     p_serve = subparsers.add_parser("serve", help="Start MCP server")
-    p_serve.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_serve.add_argument("--db", help=f"Database path (default: {DEFAULT_DB.name})")
 
-    # info
     p_info = subparsers.add_parser("info", help="Show database statistics")
-    p_info.add_argument("--db", help=f"Database path (default: {_default_db_path()})")
+    p_info.add_argument("--db", help=f"Database path (default: {DEFAULT_DB.name})")
 
-    # review-submissions
     subparsers.add_parser(
         "review-submissions",
         help="Review local learning submissions and promote approved ones",
@@ -631,10 +631,12 @@ Commands:
         return 1
 
     commands = {
+        "check": cmd_check,
+        "fetch": cmd_fetch,
         "analyze": cmd_analyze,
         "build": cmd_build,
-        "build-all": cmd_build_all,
         "update": cmd_update,
+        "check-uxp": cmd_check_uxp,
         "validate": cmd_validate,
         "serve": cmd_serve,
         "info": cmd_info,

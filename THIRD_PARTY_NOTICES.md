@@ -37,13 +37,22 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Adobe ExtendScript API reference on indesignjs.de (Gregor Fellenz)
+
+- Source: `https://www.indesignjs.de/indesignapi/` (continuation of the reference by Theunis de Jong / Jongware)
+- Used files: `indesign/api.json`, `javascript/api.json`, `scriptui/api.json`
+  (downloaded by `manage.py fetch` into `sources/indesignjs/`, not committed)
+- The descriptive texts are Adobe's; the transformation is Gregor Fellenz'.
+- The SQLite database is generated locally from these files and is not redistributed.
+- `manage.py check-uxp` optionally reads the rendered pages of `indesignapi.zip` to compare
+  the UXP runtime markers with `uxp_notes.json`.
+
 ## extendscriptApiDocTransformations (Gregor Fellenz)
 
 - Project: `https://github.com/grefel/extendscriptApiDocTransformations`
 - License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (repository license)
-- Scope in this repository:
+- Scope in this repository (from the former OMV XML pipeline, parser versions < 3.0):
   - Conceptual learnings only (no direct code import from XSLT files)
-  - Merge strategy for multiple XML sources (`indesign.xml`, `javascript.xml`, `scriptui.xml`)
-  - Early namespace normalization in parsing pipeline
+  - Merge strategy for multiple sources (InDesign DOM, Core JavaScript, ScriptUI)
   - Awareness of ScriptUI name collisions vs DOM classes
   - Reference-validation mindset for cross-source links

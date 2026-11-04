@@ -7,15 +7,16 @@ Provide two MCP servers for Adobe InDesign automation:
 - `server.py` (`indesign-dom`): read-only lookup over a local SQLite knowledge base.
 - `exec_server.py` (`indesign-exec`): run JSX in a live InDesign instance via COM/OLE.
 
-The DOM server now covers **three sources** in one DB:
+The DOM server covers **three sources** in one DB, all taken from Gregor Fellenz'
+[Adobe ExtendScript API reference](https://www.indesignjs.de/indesignapi/) (indesignjs.de):
 
-- `dom` (InDesign OMV)
-- `javascript` (ExtendScript core classes)
-- `scriptui` (legacy ScriptUI classes)
+- `dom` (InDesign object model, `indesign/api.json`)
+- `javascript` (ExtendScript core classes, `javascript/api.json`)
+- `scriptui` (legacy ScriptUI classes, `scriptui/api.json`)
 
 ## Current Architecture (What Exists Now)
 
-- Build pipeline: XML -> `parser.py` -> `extendscript.db`
+- Build pipeline: `api.json` (per target) + `uxp_notes.json` -> `parser.py` -> `extendscript.db`
 - Query layer: `db.py`
 - MCP layer: `server.py`
 - CLI entrypoint: `manage.py`
@@ -23,51 +24,65 @@ The DOM server now covers **three sources** in one DB:
 
 Primary DB file:
 
-- `extendscript.db` (new default; `indesign_dom.db` is legacy)
+- `extendscript.db` (default). `indesign_dom.db` is the legacy name; `build`/`update` refresh it too
+  when it exists, because MCP client configs may still point to it via `INDESIGN_DOM_DB`.
 
 ## Key Decisions You Must Preserve
 
-1. **Single DB + source dimension**
-   - No per-source DB split.
-   - Disambiguation is done by `source` (`dom|javascript|scriptui`).
+1. **Upstream = per-target `api.json` on indesignjs.de**
+   - Not the OMV XML from the ExtendScript Toolkit cache (Adobe no longer ships it reliably), and not
+     `indesignapi.zip` (19 MB of HTML) for the build. api.json is the structured format Gregor publishes
+     for tooling; HTML is presentation markup.
+   - Version check without download: top-level `llms.txt` (~2 KB) lists every target's version line and
+     the generation date. `manage.py check` / `update` compare it with `db_meta.dom_title` / `dom_generated`.
 
-2. **Name collision handling via schema, not renaming**
-   - `classes` uniqueness is `(name, source_id)`.
-   - Do not suffix class names (`Window (SUI)` style was intentionally avoided).
+2. **Single DB + source dimension**
+   - No per-source DB split. Disambiguation is done by `source` (`dom|javascript|scriptui`).
+   - Name collisions between `dom` and `scriptui`: Window, Button, Event, Events, Group, ListBox, Panel,
+     RadioButton, StaticText. `classes` uniqueness is `(name, source_id)`; never suffix class names.
 
-3. **Namespace normalization first**
-   - Parser strips XML namespaces before normal element traversal.
+3. **Gaps in api.json are closed in `parser.py`, not by hand-editing the DB**
+   - Static methods: api.json and the `.d.ts` files carry no static flag for methods. Core JavaScript and
+     ScriptUI are frozen, so `STATIC_METHODS` is a fixed table (`File.openDialog`, `Folder.selectDialog`,
+     `$.*`, `Math.*`, ...). Worth reporting upstream.
+   - Constructors: method named like its class (non-dom) -> `element_type='constructor'`.
+   - ScriptUI callbacks `on[A-Z]*` -> `element_type='event'`.
+   - Reserved names: upstream escapes `Index` as `Index_`; `_canonical_name()` restores `Index` in class
+     names and type strings; `doc_url` keeps the upstream slug.
+   - Suites do not exist upstream anymore; `list_classes(type=...)` filters by kind.
 
-4. **Description model**
-   - `shortdesc` + `description` are both parsed and merged.
+4. **UXP data mirrors Gregor's ExtendScript/UXP toggle**
+   - Rules in `parser.py`: enum classes -> `equals()` note; `[]` methods -> `es_only`; dom properties typed
+     `File`/`Folder` (not arrays) -> async note; `File | Function` handlers -> handler note;
+     `javascript`/`scriptui` -> source-level "ExtendScript only" note.
+   - `uxp_notes.json`: hand-written notes that no rule can derive (e.g. `Application.scriptArgs`,
+     `XMLElements.itemByName`).
+   - `manage.py check-uxp` scans the rendered pages of `indesignapi.zip` and lists markers not covered by
+     rules + overrides. Run it after upstream updates; add gaps to `uxp_notes.json`.
 
-5. **Type details retained**
-   - Multiple sibling `<datatype>` values are preserved (pipe-joined union style).
-   - `type@href` references are stored (`*_type_ref` fields).
+5. **Events have their own table** (`events`), listed by `lookup_class` and indexed in FTS as `event`.
+
+6. **Atomic build**: the DB is written to `<db>.tmp` and swapped in with `os.replace()`.
 
 ## Fast Entry Points for Future Changes
 
-- Schema/build logic: `parser.py`
-  - `DB_SCHEMA`
-  - `parse_xml()`
-  - `parse_sources()`
-  - `_parse_datatypes()`
-  - `build_database()`
-  - `validate()`
+- Fetch/parse/schema/build: `parser.py`
+  - `fetch_sources()`, `fetch_remote_versions()`
+  - `parse_api_json()`, `parse_sources()`, `_resolve_type_refs()`
+  - `STATIC_METHODS`, `UXP_NOTE_*`, `_canonical_name()`
+  - `DB_SCHEMA`, `build_database()`, `validate()`
+  - `scan_uxp_markers()` (check only, never used by the build)
 
 - Query behavior/API shape: `db.py`
-  - All lookup functions are source-aware.
-  - New capability endpoints: `list_sources()`, `knowledge_overview()`.
+  - All lookup functions are source-aware; `get_properties`/`get_methods`/`search_dom` accept `runtime`.
 
 - MCP tool contract: `server.py`
-  - Tool signatures include optional `source`.
-  - Added tools: `list_sources`, `knowledge_overview`.
+  - Tool signatures include optional `source`; `runtime` is validated by `_check_runtime()`.
   - ScriptUI warning note injection for `source="scriptui"`.
 
 - CLI workflows: `manage.py`
-  - `build-all --dom --js --sui`
-  - `validate --expect-sources ...`
-  - built-in regression smoke checks.
+  - `check`, `fetch`, `build`, `update [--force]`, `check-uxp`, `validate [--dir]`
+  - built-in regression checks after every build/validate.
 
 ## Agent Operating Pattern (Recommended)
 
@@ -75,24 +90,23 @@ Primary DB file:
 2. `list_sources()`
 3. `search_dom(query, source=...)`
 4. `lookup_class(...)` / `get_method_detail(...)`
-5. switch to `indesign-exec` tools for runtime work (`run_jsx`, `eval_expression`, `undo`)
-
-When class names are ambiguous, **always pass `source`**:
-
-- `Window`, `Group`, `Panel`, `Event` collide between `dom` and `scriptui`.
+5. For long-form reading: fetch `doc_url` (upstream Markdown page of the class)
+6. switch to `indesign-exec` tools for runtime work (`run_jsx`, `eval_expression`, `undo`)
 
 For ExtendScript-specific features, prefer `source="javascript"`:
 
 - `$`, `UnitValue`, `File`, `Folder`, `Socket`, `XML`, `XMLList`, `RegExp`.
 
+For UXP scripts pass `runtime="uxp"` and respect `uxp_note` / `extendscript_only`.
+
 ## Tool Surface (Compact)
 
 `indesign-dom` MCP:
 
-- Discovery: `knowledge_overview()`, `list_sources()`, `search_dom(query, source?)`
-- Class/API lookup: `lookup_class(name, source?)`, `get_properties(...)`, `get_methods(...)`, `get_method_detail(...)`
-- Structure/meta: `get_hierarchy(class_name, source?)`, `get_enum_values(enum_name, source?)`, `list_classes(suite?, type?, source?)`, `dom_info()`
-- Rule: for collisions (`Window`, `Group`, `Panel`, `Event`) always set `source`.
+- Discovery: `knowledge_overview()`, `list_sources()`, `search_dom(query, source?, runtime?)`
+- Class/API lookup: `lookup_class(name, source?)`, `get_properties(..., runtime?)`, `get_methods(..., runtime?)`, `get_method_detail(...)`
+- Structure/meta: `get_hierarchy(class_name, source?)`, `get_enum_values(enum_name, source?)`, `list_classes(type?, source?, filter?)`, `dom_info()`
+- Rule: for name collisions always set `source`.
 
 `indesign-exec` MCP:
 
@@ -118,22 +132,24 @@ For ExtendScript-specific features, prefer `source="javascript"`:
 
 ## Known Pain Points and Special Handling
 
-- **PowerShell and `$` in filenames**: use quoting when passing OMV paths in CLI (`'omv$indesign-...xml'`).
+- **FTS and symbols**: the FTS5 tokenizer drops `$`; `search_dom` falls back to an exact name match for such queries.
 - **ScriptUI is legacy**: keep documentation available, but suggest UXP for new UI-heavy work.
-- **MCP reload requirement**: after tool signature changes, client-side MCP reload/restart may be needed.
+- **MCP reload requirement**: after tool signature or schema changes, restart the MCP server (the client keeps the old process).
 - **COM/OLE runtime constraints**: Exec server is Windows-only and requires running InDesign.
 
 ## Validation Commands (Minimal)
 
 ```bash
 python -m py_compile parser.py db.py server.py manage.py
-python manage.py build-all --dom "sources/omv$indesign-21.064$21.0.xml" --js "sources/javascript.xml" --sui "sources/scriptui.xml"
-python manage.py validate --expect-sources dom,javascript,scriptui
+python manage.py update --force
+python manage.py validate --dir sources/indesignjs
+python manage.py check-uxp
 ```
 
 ## File Map (Targeted)
 
-- `parser.py`: XML ingestion, normalization, schema, DB build/validate
+- `parser.py`: api.json fetch + parse, UXP rules, schema, DB build/validate, UXP marker scan
+- `uxp_notes.json`: curated UXP overrides
 - `db.py`: all SQL query semantics for MCP tools
 - `server.py`: MCP interface and tool descriptions
 - `manage.py`: maintenance CLI and operational workflows
@@ -165,10 +181,10 @@ Orphan sources block "New hyperlink": `THL.findOrphanSources(doc)` / `THL.remove
 
 ## Preserved Design Rationale (No external plan files required)
 
-- The original project goal was version-agnostic OMV ingestion, so rebuild/update always starts from XML input and not from manual schema edits.
+- Version-agnostic ingestion: rebuild/update always starts from upstream api.json, never from manual DB edits.
 - The project stays single-DB and source-aware (`dom|javascript|scriptui`) to preserve cross-source lookup and avoid duplicate tooling.
 - Name collisions are resolved via `source` filter, not class renaming.
-- Parser priority order is fixed: namespace normalization -> structural parse -> type/reference preservation.
 - Exec and DOM servers stay separated by responsibility: read-only knowledge lookup vs side-effecting JSX execution.
 - ScriptUI is intentionally retained for legacy script support, but modern UI recommendation is UXP for new development.
+- InDesign Server (`indesign-server/api.json`, same format) can be added later as another target in `DEFAULT_TARGETS`.
 - `README.md` is the operational reference; implementation truth is in `parser.py`, `db.py`, `server.py`, `manage.py`.
