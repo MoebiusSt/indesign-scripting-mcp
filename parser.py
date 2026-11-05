@@ -2,9 +2,12 @@
 InDesign DOM Parser - Fetches and parses indesignjs.de api.json sources into SQLite.
 
 Source: Gregor Fellenz' Adobe ExtendScript API reference (https://www.indesignjs.de/indesignapi/),
-generated from Adobe's OMV exports. Each target ships an api.json with the whole object model.
+generated from Adobe's OMV exports. Each target ships an api.json (formatVersion 2) with the whole
+object model including static flags, UXP availability, UXP types and runtime notes. manifest.json at
+the root lists every target with version, contentHash and per-file sha256.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -13,9 +16,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-PARSER_VERSION = "3.0.0"
+PARSER_VERSION = "4.0.0"
+SUPPORTED_FORMAT_VERSION = 2
 
 API_BASE_URL = "https://www.indesignjs.de/indesignapi"
+MANIFEST_FILE = "manifest.json"
 USER_AGENT = "indesign-scripting-mcp"
 
 # Source key -> default indesignjs.de target slug.
@@ -37,22 +42,6 @@ KIND_MAP = {
     "Enumeration": "enum",
 }
 
-# api.json carries no static flag on methods. Core JavaScript and ScriptUI are frozen, so the
-# class-level (static) methods are listed here.
-STATIC_METHODS = {
-    ("javascript", "$"): {"about", "bp", "colorPicker", "evalFile", "gc", "getenv", "setenv", "sleep",
-                          "toString", "write", "writeln"},
-    ("javascript", "Date"): {"UTC", "parse"},
-    ("javascript", "File"): {"decode", "encode", "isEncodingAvailable", "openDialog", "saveDialog"},
-    ("javascript", "Folder"): {"decode", "encode", "isEncodingAvailable", "selectDialog"},
-    ("javascript", "Math"): {"*"},
-    ("javascript", "Object"): {"isValid"},
-    ("javascript", "String"): {"fromCharCode"},
-    ("javascript", "XML"): {"defaultSettings", "setSettings", "settings"},
-    ("scriptui", "ScriptUI"): {"getResourceText", "newFont", "newImage"},
-    ("scriptui", "Window"): {"alert", "confirm", "find", "prompt"},
-}
-
 PRIMITIVE_REFS = {
     "number": "javascript:Number",
     "string": "javascript:String",
@@ -60,18 +49,10 @@ PRIMITIVE_REFS = {
 }
 IGNORED_TYPE_TOKENS = {"any", "void", "null", "undefined", "VariesType"}
 
-UXP_NOTES_PATH = Path(__file__).parent / "uxp_notes.json"
-
-UXP_NOTE_ENUM = (
-    "In UXP, compare with equals() - the == and === operators do not work on DOM objects: "
-    "myPath.pathType.equals(PathType.CLOSED_PATH), not myPath.pathType == PathType.CLOSED_PATH."
-)
+# Fallback texts when api.json marks a member as unavailable under UXP without a note.
 UXP_NOTE_INDEX_ACCESSOR = "Not available in UXP: collections have no [] index accessor. Use item(index) instead."
-UXP_NOTE_FILE = (
-    "In UXP, File/Folder are entries from require('uxp').storage.localFileSystem - "
-    "obtaining them and their read and write methods return promises (async)."
-)
-UXP_NOTE_FILE_HANDLER = "In UXP the handler must be a Function; a File (script file) handler is ExtendScript only."
+UXP_NOTE_UNAVAILABLE = "Not available in UXP."
+UXP_TYPES_PACKAGE = "https://www.npmjs.com/package/indesign-uxp-types"
 UXP_NOTE_SOURCE = (
     "ExtendScript only - UXP uses a different engine. In UXP use the standard JavaScript classes (MDN) "
     "and require('uxp').storage for files."
@@ -87,9 +68,10 @@ def target_url(target: str, filename: str = "api.json") -> str:
     return f"{API_BASE_URL}/{target}/{filename}"
 
 
-def doc_url(target: str, object_slug: str) -> str:
-    """Return the Markdown twin URL of one object page."""
-    return f"{API_BASE_URL}/{target}/{object_slug}.md"
+def doc_url(target: str, page: str) -> str:
+    """Return the Markdown twin URL of one object page (page is the HTML file name, e.g. Index_.html)."""
+    stem = page[:-5] if page.endswith(".html") else page
+    return f"{API_BASE_URL}/{target}/{stem}.md"
 
 
 def _http_get(url: str, timeout: int = 120) -> bytes:
@@ -98,37 +80,51 @@ def _http_get(url: str, timeout: int = 120) -> bytes:
         return resp.read()
 
 
-def fetch_sources(dest_dir: str, targets: dict[str, str] | None = None) -> list[tuple[str, str]]:
-    """Download api.json for every source into dest_dir/<target>/api.json.
+def _write_atomic(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(payload)
+    os.replace(tmp, path)
 
+
+def fetch_manifest() -> dict:
+    """Download manifest.json and return {"raw": manifest, "targets": {slug: target entry}}."""
+    manifest = json.loads(_http_get(f"{API_BASE_URL}/{MANIFEST_FILE}", timeout=30))
+    return {"raw": manifest, "targets": {t["slug"]: t for t in manifest.get("targets", [])}}
+
+
+def load_manifest(sources_dir: str) -> dict:
+    """Read the manifest.json stored next to fetched sources; empty targets if missing."""
+    path = Path(sources_dir) / MANIFEST_FILE
+    if not path.exists():
+        return {"raw": {}, "targets": {}}
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    return {"raw": manifest, "targets": {t["slug"]: t for t in manifest.get("targets", [])}}
+
+
+def fetch_sources(dest_dir: str, targets: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """Download manifest.json and api.json for every source into dest_dir/<target>/api.json.
+
+    Each api.json is checked against the sha256 listed in the manifest.
     Returns [(source_key, local_path), ...].
     """
     targets = targets or DEFAULT_TARGETS
+    manifest = fetch_manifest()
     result = []
     for source_key, target in targets.items():
-        url = target_url(target)
-        payload = _http_get(url)
-        json.loads(payload)
-        path = Path(dest_dir) / target / "api.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_bytes(payload)
-        os.replace(tmp, path)
-        result.append((source_key, str(path)))
+        entry = manifest["targets"].get(target)
+        if entry is None:
+            raise ValueError(f"Target '{target}' is not listed in {MANIFEST_FILE}")
+        payload = _http_get(target_url(target))
+        expected = next((f["sha256"] for f in entry.get("files", []) if f["path"] == f"{target}/api.json"), None)
+        actual = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if expected and expected != actual:
+            raise ValueError(f"{target}/api.json: sha256 mismatch (manifest {expected}, download {actual})")
+        _check_format(json.loads(payload), f"{target}/api.json")
+        _write_atomic(Path(dest_dir) / target / "api.json", payload)
+        result.append((source_key, str(Path(dest_dir) / target / "api.json")))
+    _write_atomic(Path(dest_dir) / MANIFEST_FILE, json.dumps(manifest["raw"], indent=2).encode("utf-8"))
     return result
-
-
-def fetch_remote_versions() -> dict:
-    """Read the top-level llms.txt (about 2 KB).
-
-    Returns {"generated": "YYYY-MM-DD" | "", "targets": {target_slug: version line}}.
-    """
-    text = _http_get(f"{API_BASE_URL}/llms.txt", timeout=30).decode("utf-8")
-    versions = {}
-    for match in re.finditer(r"\]\(https?://[^)]+/indesignapi/([\w-]+)/llms\.txt\):\s*(.+)", text):
-        versions[match.group(1)] = match.group(2).strip()
-    generated = re.search(r"\bon (\d{4}-\d{2}-\d{2})\b", text)
-    return {"generated": generated.group(1) if generated else "", "targets": versions}
 
 
 def local_source_paths(sources_dir: str, targets: dict[str, str] | None = None) -> list[tuple[str, str]]:
@@ -141,21 +137,15 @@ def local_source_paths(sources_dir: str, targets: dict[str, str] | None = None) 
 # api.json Parsing
 # ---------------------------------------------------------------------------
 
-def parse_api_json(json_path: str, source_key: str = "dom") -> dict:
-    """Parse one api.json file and return structured data."""
+def parse_api_json(json_path: str, source_key: str = "dom", manifest_entry: dict | None = None) -> dict:
+    """Parse one api.json file (formatVersion 2) and return structured data."""
     with open(json_path, encoding="utf-8") as f:
         raw = json.load(f)
+    _check_format(raw, json_path)
 
     target = raw.get("slug") or DEFAULT_TARGETS.get(source_key, source_key)
-    objects = raw.get("objects", [])
-
-    renames = {o["name"]: _canonical_name(o["name"]) for o in objects if _canonical_name(o["name"]) != o["name"]}
-    uxp_overrides = _load_uxp_overrides().get(source_key, {})
-
-    classes = [
-        _parse_object(obj, source_key, target, renames, uxp_overrides)
-        for obj in objects
-    ]
+    runtimes = raw.get("runtimes") or ["extendscript"]
+    classes = [_parse_object(obj, source_key, target) for obj in raw.get("objects", [])]
 
     version_label = raw.get("version", "")
     return {
@@ -167,25 +157,32 @@ def parse_api_json(json_path: str, source_key: str = "dom") -> dict:
         "version": _extract_version_number(version_label) or version_label,
         "title": version_label,
         "generated": raw.get("generated", ""),
+        "format_version": raw.get("formatVersion"),
+        "runtimes": runtimes,
+        "content_hash": (manifest_entry or {}).get("contentHash", ""),
+        "uxp_guide_url": target_url(target, "uxp.md") if "uxp" in runtimes else None,
         "classes": classes,
     }
 
 
-def parse_sources(sources: list[tuple[str, str]]) -> list[dict]:
+def parse_sources(sources: list[tuple[str, str]], manifest: dict | None = None) -> list[dict]:
     """Parse multiple api.json sources.
 
-    sources: [(source_key, json_path), ...]
+    sources: [(source_key, json_path), ...]; manifest: result of load_manifest()/fetch_manifest().
     """
-    parsed = [parse_api_json(path, source_key=key) for key, path in sources]
+    targets = (manifest or {}).get("targets", {})
+    parsed = [
+        parse_api_json(path, source_key=key, manifest_entry=targets.get(DEFAULT_TARGETS.get(key, key)))
+        for key, path in sources
+    ]
     _resolve_type_refs(parsed)
     return parsed
 
 
-def _canonical_name(name: str) -> str:
-    """Undo the trailing-underscore escaping applied to reserved names (e.g. Index_ -> Index)."""
-    if len(name) > 1 and name.endswith("_") and not name.endswith("__"):
-        return name[:-1]
-    return name
+def _check_format(raw: dict, label: str) -> None:
+    version = raw.get("formatVersion", 1)
+    if version < SUPPORTED_FORMAT_VERSION:
+        raise ValueError(f"{label}: formatVersion {version} is not supported (need >= {SUPPORTED_FORMAT_VERSION})")
 
 
 def _extract_version_number(label: str) -> str:
@@ -193,121 +190,100 @@ def _extract_version_number(label: str) -> str:
     return match.group(1) if match else ""
 
 
-def _load_uxp_overrides() -> dict:
-    if not UXP_NOTES_PATH.exists():
-        return {}
-    with UXP_NOTES_PATH.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("sources", {})
-
-
-def _rename_type(type_str: str | None, renames: dict[str, str]) -> str | None:
-    if not type_str or not renames:
-        return type_str
-    return re.sub(r"[A-Za-z_$][\w$]*", lambda m: renames.get(m.group(0), m.group(0)), type_str)
+def _notes(entry: dict) -> dict:
+    """Split api.json notes by runtime into uxp / extendscript / general texts."""
+    buckets = {"uxp": [], "extendscript": [], "general": []}
+    for note in entry.get("notes") or []:
+        text = (note.get("text") or "").strip()
+        if not text:
+            continue
+        runtime = note.get("runtime")
+        key = "uxp" if runtime == "uxp" else "extendscript" if runtime in ("es", "extendscript") else "general"
+        buckets[key].append(text)
+    return {
+        "uxp_note": " ".join(buckets["uxp"]) or None,
+        "es_note": " ".join(buckets["extendscript"]) or None,
+        "note": " ".join(buckets["general"]) or None,
+    }
 
 
 def _is_array_type(type_str: str | None) -> bool:
     return bool(type_str) and type_str.rstrip().endswith("]")
 
 
-def _parse_object(obj: dict, source_key: str, target: str, renames: dict, uxp_overrides: dict) -> dict:
-    slug = obj["name"]
-    name = renames.get(slug, slug)
+def _parse_object(obj: dict, source_key: str, target: str) -> dict:
+    name = obj["name"]
     kind = KIND_MAP.get(obj.get("kind", ""), "object")
     is_enum = kind == "enum"
-    class_overrides = uxp_overrides.get(name, {})
-
-    class_uxp_note = class_overrides.get("class")
-    if not class_uxp_note and is_enum and source_key == "dom":
-        class_uxp_note = UXP_NOTE_ENUM
-
-    properties = []
-    for prop in obj.get("properties", []) or []:
-        properties.append(_parse_property(prop, source_key, is_enum, renames, class_overrides))
-
-    methods = []
-    for meth in obj.get("methods", []) or []:
-        methods.append(_parse_method(meth, name, source_key, renames, class_overrides))
-
-    events = [
-        {"name": ev.get("name", ""), "description": ev.get("description", "") or ""}
-        for ev in obj.get("events", []) or []
-    ]
-
     return {
         "name": name,
-        "slug": slug,
         "source_key": source_key,
         "kind": kind,
         "is_enum": is_enum,
         "description": obj.get("description", "") or "",
-        "superclass_name": renames.get(obj.get("extends"), obj.get("extends")) or None,
-        "collection_of": renames.get(obj.get("elementType"), obj.get("elementType")) or None,
-        "doc_url": doc_url(target, slug),
-        "uxp_note": class_uxp_note,
-        "properties": properties,
-        "methods": methods,
-        "events": events,
+        "superclass_name": obj.get("extends") or None,
+        "collection_of": obj.get("elementType") or None,
+        "doc_url": doc_url(target, obj.get("page") or f"{name}.html"),
+        **_notes(obj),
+        "properties": [_parse_property(prop, is_enum) for prop in obj.get("properties", []) or []],
+        "methods": [_parse_method(meth, name, source_key) for meth in obj.get("methods", []) or []],
+        "events": [
+            {"name": ev.get("name", ""), "description": ev.get("description", "") or ""}
+            for ev in obj.get("events", []) or []
+        ],
     }
 
 
-def _parse_property(prop: dict, source_key: str, is_enum: bool, renames: dict, class_overrides: dict) -> dict:
-    name = prop.get("name", "")
-    data_type = _rename_type(prop.get("type"), renames)
+def _parse_property(prop: dict, is_enum: bool) -> dict:
+    data_type = prop.get("type")
     rng = prop.get("range") or {}
-    element_type = "class" if (is_enum or prop.get("static")) else "instance"
-
-    uxp_note = class_overrides.get("properties", {}).get(name)
-    if not uxp_note and source_key == "dom" and data_type:
-        if re.search(r"\bFile\b", data_type) and re.search(r"\bFunction\b", data_type):
-            uxp_note = UXP_NOTE_FILE_HANDLER
-        elif re.search(r"\b(File|Folder)\b", data_type) and not _is_array_type(data_type):
-            uxp_note = UXP_NOTE_FILE
-
+    uxp = prop.get("uxp") or {}
+    notes = _notes(prop)
+    if uxp.get("available") is False:
+        notes["uxp_note"] = notes["uxp_note"] or UXP_NOTE_UNAVAILABLE
     return {
-        "name": name,
+        "name": prop.get("name", ""),
         "description": prop.get("description", "") or "",
         "data_type": data_type,
         "data_type_ref": None,
         "is_array": _is_array_type(data_type),
         "is_readonly": prop.get("access") == "readonly",
-        "element_type": element_type,
+        "element_type": "class" if (is_enum or prop.get("static")) else "instance",
         "default_value": prop.get("value"),
         "min_value": rng.get("min"),
         "max_value": rng.get("max"),
         "measurement_unit": bool(prop.get("measurementUnit")),
-        "uxp_note": uxp_note,
+        "es_only": uxp.get("available") is False,
+        "uxp_type": uxp.get("type"),
+        **notes,
     }
 
 
-def _method_element_type(class_name: str, method_name: str, source_key: str) -> str:
-    if method_name == class_name and source_key != "dom":
-        return "constructor"
-    statics = STATIC_METHODS.get((source_key, class_name), set())
-    if "*" in statics or method_name in statics:
+def _method_element_type(meth: dict, class_name: str, source_key: str) -> str:
+    name = meth.get("name", "")
+    if meth.get("static"):
         return "class"
-    if source_key == "scriptui" and re.match(r"on[A-Z]", method_name):
+    if name == class_name and source_key != "dom":
+        return "constructor"
+    if source_key == "scriptui" and re.match(r"on[A-Z]", name):
         return "event"
     return "instance"
 
 
-def _parse_method(meth: dict, class_name: str, source_key: str, renames: dict, class_overrides: dict) -> dict:
+def _parse_method(meth: dict, class_name: str, source_key: str) -> dict:
     name = meth.get("name", "")
-    return_type = _rename_type(meth.get("returns"), renames)
-    es_only = name == "[]" or name in class_overrides.get("es_only_methods", [])
-
-    uxp_note = class_overrides.get("methods", {}).get(name)
-    if not uxp_note and es_only:
-        uxp_note = UXP_NOTE_INDEX_ACCESSOR
+    return_type = meth.get("returns")
+    uxp = meth.get("uxp") or {}
+    es_only = uxp.get("available") is False
+    notes = _notes(meth)
+    if es_only and not notes["uxp_note"]:
+        notes["uxp_note"] = UXP_NOTE_INDEX_ACCESSOR if name == "[]" else UXP_NOTE_UNAVAILABLE
 
     parameters = []
     for idx, param in enumerate(meth.get("parameters", []) or []):
-        p_type = _rename_type(param.get("type"), renames)
+        p_type = param.get("type")
         rng = param.get("range") or {}
         p_desc = param.get("description", "") or ""
-        if not uxp_note and source_key == "dom" and p_type and re.search(r"\bFile\b", p_type) and re.search(r"\bFunction\b", p_type):
-            uxp_note = UXP_NOTE_FILE_HANDLER
         parameters.append(
             {
                 "name": param.get("name", ""),
@@ -330,9 +306,10 @@ def _parse_method(meth: dict, class_name: str, source_key: str, renames: dict, c
         "return_type": return_type,
         "return_type_ref": None,
         "return_is_array": _is_array_type(return_type),
-        "element_type": _method_element_type(class_name, name, source_key),
+        "element_type": _method_element_type(meth, class_name, source_key),
         "es_only": es_only,
-        "uxp_note": uxp_note,
+        "uxp_type": uxp.get("returns"),
+        **notes,
         "parameters": parameters,
     }
 
@@ -459,6 +436,10 @@ CREATE TABLE IF NOT EXISTS sources (
     version     TEXT,
     title       TEXT,
     generated   TEXT,
+    format_version INTEGER,
+    runtimes    TEXT,
+    content_hash TEXT,
+    uxp_guide_url TEXT,
     uxp_note    TEXT
 );
 
@@ -474,6 +455,8 @@ CREATE TABLE IF NOT EXISTS classes (
     collection_of   TEXT,
     doc_url         TEXT,
     uxp_note        TEXT,
+    es_note         TEXT,
+    note            TEXT,
     UNIQUE(name, source_id)
 );
 
@@ -492,7 +475,11 @@ CREATE TABLE IF NOT EXISTS properties (
     min_value       TEXT,
     max_value       TEXT,
     measurement_unit BOOLEAN NOT NULL DEFAULT 0,
-    uxp_note        TEXT
+    es_only         BOOLEAN NOT NULL DEFAULT 0,
+    uxp_type        TEXT,
+    uxp_note        TEXT,
+    es_note         TEXT,
+    note            TEXT
 );
 
 -- Methods
@@ -506,7 +493,10 @@ CREATE TABLE IF NOT EXISTS methods (
     return_is_array BOOLEAN NOT NULL DEFAULT 0,
     element_type    TEXT NOT NULL DEFAULT 'instance',
     es_only         BOOLEAN NOT NULL DEFAULT 0,
-    uxp_note        TEXT
+    uxp_type        TEXT,
+    uxp_note        TEXT,
+    es_note         TEXT,
+    note            TEXT
 );
 
 -- Parameters
@@ -575,6 +565,8 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
         "dom_version": dom_payload["version"],
         "dom_title": dom_payload["title"],
         "dom_generated": dom_payload["generated"],
+        "dom_content_hash": dom_payload["content_hash"],
+        "format_version": str(dom_payload["format_version"]),
         "build_timestamp": build_ts,
         "parser_version": PARSER_VERSION,
     }
@@ -587,8 +579,9 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
     for payload in sources_data:
         source_key = payload["source_key"]
         cur = conn.execute(
-            """INSERT INTO sources (key, label, target, url, version, title, generated, uxp_note)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO sources (key, label, target, url, version, title, generated, format_version, runtimes,
+                                   content_hash, uxp_guide_url, uxp_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_key,
                 SOURCE_LABELS.get(source_key, source_key),
@@ -597,7 +590,11 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
                 payload["version"],
                 payload["title"],
                 payload["generated"],
-                UXP_NOTE_SOURCE if source_key in ("javascript", "scriptui") else None,
+                payload["format_version"],
+                ",".join(payload["runtimes"]),
+                payload["content_hash"],
+                payload["uxp_guide_url"],
+                None if "uxp" in payload["runtimes"] else UXP_NOTE_SOURCE,
             ),
         )
         source_id = cur.lastrowid
@@ -605,11 +602,13 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
         for cls in payload["classes"]:
             cur = conn.execute(
                 """INSERT INTO classes
-                   (name, source_id, kind, is_enum, description, superclass_name, collection_of, doc_url, uxp_note)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (name, source_id, kind, is_enum, description, superclass_name, collection_of, doc_url,
+                    uxp_note, es_note, note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     cls["name"], source_id, cls["kind"], int(cls["is_enum"]), cls["description"],
-                    cls["superclass_name"], cls["collection_of"], cls["doc_url"], cls["uxp_note"],
+                    cls["superclass_name"], cls["collection_of"], cls["doc_url"],
+                    cls["uxp_note"], cls["es_note"], cls["note"],
                 ),
             )
             class_id = cur.lastrowid
@@ -621,13 +620,15 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
                 conn.execute(
                     """INSERT INTO properties
                        (class_id, name, description, data_type, data_type_ref, is_array, is_readonly,
-                        element_type, default_value, min_value, max_value, measurement_unit, uxp_note)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        element_type, default_value, min_value, max_value, measurement_unit, es_only,
+                        uxp_type, uxp_note, es_note, note)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         class_id, prop["name"], prop["description"], prop["data_type"], prop["data_type_ref"],
                         int(prop["is_array"]), int(prop["is_readonly"]), prop["element_type"],
                         prop["default_value"], prop["min_value"], prop["max_value"],
-                        int(prop["measurement_unit"]), prop["uxp_note"],
+                        int(prop["measurement_unit"]), int(prop["es_only"]),
+                        prop["uxp_type"], prop["uxp_note"], prop["es_note"], prop["note"],
                     ),
                 )
                 totals["properties"] += 1
@@ -637,11 +638,12 @@ def build_database(data: dict | list[dict], db_path: str) -> dict:
                 cur = conn.execute(
                     """INSERT INTO methods
                        (class_id, name, description, return_type, return_type_ref, return_is_array,
-                        element_type, es_only, uxp_note)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        element_type, es_only, uxp_type, uxp_note, es_note, note)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         class_id, meth["name"], meth["description"], meth["return_type"], meth["return_type_ref"],
-                        int(meth["return_is_array"]), meth["element_type"], int(meth["es_only"]), meth["uxp_note"],
+                        int(meth["return_is_array"]), meth["element_type"], int(meth["es_only"]),
+                        meth["uxp_type"], meth["uxp_note"], meth["es_note"], meth["note"],
                     ),
                 )
                 method_id = cur.lastrowid
@@ -783,79 +785,3 @@ def print_validation(passed: bool, messages: list[str]):
     print(sep)
     print(f"  Structure validation: {'[OK] PASSED' if passed else '[FAIL] FAILED'}")
     print(sep)
-
-
-# ---------------------------------------------------------------------------
-# UXP coverage check (rendered HTML pages of indesignapi.zip)
-# ---------------------------------------------------------------------------
-# The build never depends on HTML. This check reads Gregor's UXP markers from the
-# rendered pages and reports the ones that the rules + uxp_notes.json do not cover.
-
-ARCHIVE_URL = f"{API_BASE_URL}/indesignapi.zip"
-
-_MEMBER_ANCHOR_RE = re.compile(r'<(?:tr|article)[^>]*\bid="([pme])-([^"]+)"([^>]*)>')
-_UXP_TEXT_RE = re.compile(r'<(p|span)[^>]*class="m?warn"[^>]*data-only="uxp"[^>]*>(.*?)</\1>', re.S)
-_UXP_ASYNC_RE = re.compile(r'<span class="uxpv"[^>]*data-only="uxp"')
-
-
-def download_archive(dest: str, url: str = ARCHIVE_URL) -> str:
-    """Download indesignapi.zip (about 19 MB) to dest and return the path."""
-    payload = _http_get(url, timeout=300)
-    path = Path(dest)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".zip.tmp")
-    tmp.write_bytes(payload)
-    os.replace(tmp, path)
-    return str(path)
-
-
-def scan_uxp_markers(archive_path: str, target: str = "indesign") -> dict:
-    """Collect UXP markers per object page.
-
-    Returns {object_name: {"class_note": str | None,
-                           "members": {(kind, name): {"hidden": bool, "note": str | None, "async": bool}}}}
-    with kind "p" (property), "m" (method) or "e" (event). Object names are canonical (Index_ -> Index).
-    """
-    import html as html_lib
-    import zipfile
-
-    def clean(fragment: str) -> str:
-        return re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
-
-    def notes_in(fragment: str) -> str | None:
-        texts = list(dict.fromkeys(clean(m.group(2)) for m in _UXP_TEXT_RE.finditer(fragment)))
-        return " ".join(t for t in texts if t) or None
-
-    if Path(archive_path).is_dir():
-        base = Path(archive_path) / target
-        pages = [(p.stem, p.read_text(encoding="utf-8")) for p in base.glob("*.html")]
-    else:
-        with zipfile.ZipFile(archive_path) as zf:
-            prefix = f"{target}/"
-            pages = [
-                (n[len(prefix):-5], zf.read(n).decode("utf-8"))
-                for n in zf.namelist()
-                if n.startswith(prefix) and n.endswith(".html") and "/" not in n[len(prefix):]
-            ]
-
-    result = {}
-    for slug, page in pages:
-        if slug == "index":
-            continue
-        anchors = list(_MEMBER_ANCHOR_RE.finditer(page))
-        head = page[: anchors[0].start()] if anchors else page
-        members = {}
-        for idx, anchor in enumerate(anchors):
-            end = anchors[idx + 1].start() if idx + 1 < len(anchors) else len(page)
-            segment = page[anchor.start():end]
-            entry = {
-                "hidden": 'data-uxp="hide"' in anchor.group(3),
-                "note": notes_in(segment),
-                "async": bool(_UXP_ASYNC_RE.search(segment)),
-            }
-            if entry["hidden"] or entry["note"] or entry["async"]:
-                members[(anchor.group(1), html_lib.unescape(anchor.group(2)))] = entry
-        class_note = notes_in(head)
-        if class_note or members:
-            result[_canonical_name(slug)] = {"class_note": class_note, "members": members}
-    return result

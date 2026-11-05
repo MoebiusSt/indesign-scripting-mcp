@@ -35,10 +35,27 @@ def _source_clause(source: str | None) -> tuple[str, tuple]:
     return "", ()
 
 
-def _with_uxp(item: dict, note: str | None, runtime: str | None = None) -> dict:
-    """Attach a UXP note unless the caller explicitly asked for ExtendScript only."""
-    if note and runtime != "extendscript":
-        item["uxp_note"] = note
+def _with_runtime(item: dict, row: sqlite3.Row, runtime: str | None = None, uxp_fallback: str | None = None) -> dict:
+    """Attach runtime-specific fields of a row.
+
+    uxp_note / uxp_type are dropped for runtime='extendscript', extendscript_note for runtime='uxp';
+    the general note is always kept.
+    """
+    keys = row.keys()
+
+    def value(key: str) -> str | None:
+        return row[key] if key in keys else None
+
+    if runtime != "extendscript":
+        uxp_note = value("uxp_note") or uxp_fallback
+        if uxp_note:
+            item["uxp_note"] = uxp_note
+        if value("uxp_type"):
+            item["uxp_type"] = value("uxp_type")
+    if runtime != "uxp" and value("es_note"):
+        item["extendscript_note"] = value("es_note")
+    if value("note"):
+        item["note"] = value("note")
     return item
 
 
@@ -47,7 +64,7 @@ def _class_rows(conn: sqlite3.Connection, name: str, source: str | None = None):
     clause, params = _source_clause(source)
     return conn.execute(
         f"""SELECT c.id, c.name, c.kind, c.is_enum, c.description, c.superclass_name, c.collection_of,
-                  c.doc_url, c.uxp_note, src.key AS source, src.uxp_note AS source_uxp_note
+                  c.doc_url, c.uxp_note, c.es_note, c.note, src.key AS source, src.uxp_note AS source_uxp_note
            FROM classes c
            JOIN sources src ON c.source_id = src.id
            WHERE c.name = ?{clause}
@@ -102,7 +119,7 @@ def lookup_class(name: str, source: str | None = None, db_path: str | None = Non
             item["collection_of"] = row["collection_of"]
         if events:
             item["events"] = events
-        _with_uxp(item, row["uxp_note"] or row["source_uxp_note"])
+        _with_runtime(item, row, uxp_fallback=row["source_uxp_note"])
         result.append(item)
     conn.close()
     return result[0] if len(result) == 1 else result
@@ -134,7 +151,8 @@ def get_properties(
     query = f"""
         SELECT p.name, p.description, p.data_type, p.is_array, p.is_readonly,
                p.data_type_ref, p.element_type, p.default_value, p.min_value, p.max_value,
-               p.measurement_unit, p.uxp_note, c.name AS class_name, src.key AS source
+               p.measurement_unit, p.es_only, p.uxp_type, p.uxp_note, p.es_note, p.note,
+               c.name AS class_name, src.key AS source
         FROM properties p
         JOIN classes c ON p.class_id = c.id
         JOIN sources src ON c.source_id = src.id
@@ -146,6 +164,8 @@ def get_properties(
         query += " AND (p.name LIKE ? OR p.description LIKE ?)"
         like = f"%{filter_text}%"
         params.extend([like, like])
+    if runtime == "uxp":
+        query += " AND p.es_only = 0"
 
     query += " ORDER BY src.key, c.name, p.element_type, p.name"
 
@@ -169,7 +189,9 @@ def get_properties(
             "defined_in": r["class_name"],
             "source": r["source"],
         }
-        result.append(_with_uxp(item, r["uxp_note"], runtime))
+        if r["es_only"]:
+            item["extendscript_only"] = True
+        result.append(_with_runtime(item, r, runtime))
     return result
 
 
@@ -201,7 +223,7 @@ def get_methods(
     placeholders = ",".join("?" for _ in class_ids)
     query = f"""
         SELECT m.id, m.name, m.description, m.return_type, m.return_is_array,
-               m.return_type_ref, m.element_type, m.es_only, m.uxp_note,
+               m.return_type_ref, m.element_type, m.es_only, m.uxp_type, m.uxp_note, m.es_note, m.note,
                c.name AS class_name, src.key AS source
         FROM methods m
         JOIN classes c ON m.class_id = c.id
@@ -250,7 +272,7 @@ def get_methods(
         }
         if r["es_only"]:
             item["extendscript_only"] = True
-        result.append(_with_uxp(item, r["uxp_note"], runtime))
+        result.append(_with_runtime(item, r, runtime))
 
     conn.close()
     return result
@@ -268,7 +290,7 @@ def get_method_detail(
     clause, params = _source_clause(source)
     rows = conn.execute(
         f"""SELECT m.id, m.name, m.description, m.return_type, m.return_type_ref, m.return_is_array,
-                  m.element_type, m.es_only, m.uxp_note, src.key AS source
+                  m.element_type, m.es_only, m.uxp_type, m.uxp_note, m.es_note, m.note, src.key AS source
            FROM methods m
            JOIN classes c ON m.class_id = c.id
            JOIN sources src ON c.source_id = src.id
@@ -322,7 +344,7 @@ def get_method_detail(
         }
         if row["es_only"]:
             item["extendscript_only"] = True
-        result.append(_with_uxp(item, row["uxp_note"]))
+        result.append(_with_runtime(item, row))
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -332,7 +354,7 @@ def get_enum_values(enum_name: str, source: str | None = None, db_path: str | No
     conn = _connect(db_path)
     clause, params = _source_clause(source)
     rows = conn.execute(
-        f"""SELECT c.id, c.name, c.description, c.uxp_note, src.key AS source
+        f"""SELECT c.id, c.name, c.description, c.uxp_note, c.es_note, c.note, src.key AS source
             FROM classes c
             JOIN sources src ON c.source_id = src.id
             WHERE c.name = ? AND c.is_enum = 1{clause}
@@ -365,7 +387,7 @@ def get_enum_values(enum_name: str, source: str | None = None, db_path: str | No
                 for v in values
             ],
         }
-        result.append(_with_uxp(item, row["uxp_note"]))
+        result.append(_with_runtime(item, row))
     conn.close()
     return result[0] if len(result) == 1 else result
 
@@ -546,6 +568,7 @@ def list_sources(db_path: str | None = None) -> list[dict]:
     conn = _connect(db_path)
     rows = conn.execute(
         """SELECT src.key AS source, src.label, src.url, src.version, src.title, src.generated, src.uxp_note,
+                  src.runtimes, src.uxp_guide_url,
                   (SELECT COUNT(*) FROM classes c WHERE c.source_id = src.id) AS classes,
                   (SELECT COUNT(*) FROM properties p JOIN classes c ON p.class_id = c.id
                     WHERE c.source_id = src.id) AS properties,
@@ -563,13 +586,16 @@ def list_sources(db_path: str | None = None) -> list[dict]:
             "url": r["url"] or "",
             "version": r["title"] or r["version"] or "",
             "generated": r["generated"] or "",
+            "runtimes": (r["runtimes"] or "extendscript").split(","),
             "counts": {
                 "classes": r["classes"],
                 "properties": r["properties"],
                 "methods": r["methods"],
             },
         }
-        result.append(_with_uxp(item, r["uxp_note"]))
+        if r["uxp_guide_url"]:
+            item["uxp_guide_url"] = r["uxp_guide_url"]
+        result.append(_with_runtime(item, r))
     return result
 
 
@@ -588,9 +614,11 @@ def knowledge_overview(db_path: str | None = None) -> dict:
         ),
         "runtime_note": (
             "The InDesign DOM is shared by ExtendScript and UXP. Entries carrying 'uxp_note' behave differently "
-            "in UXP; 'extendscript_only' methods (e.g. the [] index accessor) do not exist in UXP. "
-            "Pass runtime='uxp' to get_methods/search_dom to hide them. In UXP compare enum values with equals(); "
-            "File/Folder are async entries from require('uxp').storage.localFileSystem. "
+            "in UXP; 'uxp_type' is the type under UXP (e.g. Promise<File> for File/Folder properties); "
+            "'extendscript_only' members (e.g. the [] index accessor) do not exist in UXP. "
+            "Pass runtime='uxp' to get_properties/get_methods/search_dom to hide them. "
+            "General UXP rules (require, item(), equals(), script.args, script.setResult()) are at "
+            "uxp_guide_url of the 'dom' source; TypeScript types for UXP: npm package indesign-uxp-types. "
             "Sources 'javascript' and 'scriptui' are ExtendScript only."
         ),
         "online_docs": (

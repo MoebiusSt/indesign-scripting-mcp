@@ -9,7 +9,7 @@ flowchart LR
   DOM_JSON["indesign/api.json"] --> Parser[parser.py]
   JS_JSON["javascript/api.json"] --> Parser
   SUI_JSON["scriptui/api.json"] --> Parser
-  UXP_NOTES[uxp_notes.json] --> Parser
+  MANIFEST["manifest.json"] --> Parser
   Parser --> SQLite[(extendscript.db)]
   SQLite --> DomServer["server.py (InDesign DOM MCP)"]
   Agent[Agent] --> DomServer
@@ -24,8 +24,7 @@ flowchart LR
 - `exec_server.py`: MCP tools for script execution in InDesign (ExtendScript & UXP)
 - `indesign_com.py`: COM/OLE automation layer + safe JSX/UXP wrapper + modal dialog watchdog
 - `json_polyfill.jsx`: ExtendScript JSON polyfill + `__safeStringify()` (DOM-safe)
-- `parser.py`: api.json fetcher + parser + database builder (SQLite + FTS5), UXP rules, UXP marker scan
-- `uxp_notes.json`: hand-curated UXP notes that no rule can derive from api.json
+- `parser.py`: manifest/api.json fetcher + parser + database builder (SQLite + FTS5)
 - `db.py`: database query layer for DOM tools
 - `manage.py`: CLI to check/fetch/build/update/validate the database and review gotcha submissions
 - `gotchas.json`: curated gotchas and best-practice knowledge base
@@ -41,21 +40,25 @@ The database is built from the [Adobe ExtendScript API reference](https://www.in
 | `javascript` | `javascript/api.json` | ExtendScript Core JavaScript (`$`, `File`, `Folder`, `UnitValue`, `XML`, ...) |
 | `scriptui` | `scriptui/api.json` | ScriptUI |
 
-What the parser adds on top of api.json:
+The parser requires api.json `formatVersion` 2 and takes everything from the data:
 
-- **Static methods** of Core JavaScript and ScriptUI (`File.openDialog`, `Folder.selectDialog`, `$.evalFile`, ...): api.json and the `.d.ts` files carry no static flag for methods, so `parser.py` keeps a fixed table (`STATIC_METHODS`). Both libraries are frozen.
-- **Reserved names**: upstream escapes `Index` as `Index_`; the parser restores `Index` (the `doc_url` keeps `Index_.md`).
-- **UXP runtime data**, mirroring the ExtendScript/UXP toggle on indesignjs.de: rules in `parser.py` (enum `equals()`, no `[]` accessor, async `File`/`Folder`, `File` event handlers) plus `uxp_notes.json` for hand-written cases. `manage.py check-uxp` scans the rendered pages of `indesignapi.zip` and lists every UXP marker that rules and overrides do not cover.
+- **Static members**: `"static": true` on properties and methods (`File.openDialog`, `Window.alert`, `$.*`, `Math.*`) -> `element_type='class'`.
+- **UXP runtime data** (`runtimes: ["extendscript", "uxp"]` on the InDesign target):
+  - `"uxp": {"available": false}` (the `[]` accessors, `XMLElements.itemByName`) -> `extendscript_only`, hidden with `runtime="uxp"`;
+  - `"uxp": {"type": ...}` / `"uxp": {"returns": ...}` (e.g. `Promise<File>` for File/Folder properties, `string` for `Link.filePath`) -> `uxp_type`;
+  - `notes` per runtime -> `uxp_note`, `extendscript_note`, `note` (e.g. `equals()` on every enumeration, `scriptArgs`, `doScript`).
+  - General UXP rules: `<target>/uxp.md`, exposed as `uxp_guide_url` in `list_sources`. UXP TypeScript types: [`indesign-uxp-types`](https://www.npmjs.com/package/indesign-uxp-types).
+- **Names**: `name` is the original (`Index`, `$`); `doc_url` is built from `page` (`Index_.html` -> `Index_.md`).
+- **Update check**: `manifest.json` lists per target `version`, `contentHash` (api.json without `generated`) and per file `sha256`. `fetch` verifies the sha256 of every api.json; `check`/`update` compare `contentHash` with the database.
 - **Suites** no longer exist upstream; `list_classes` filters by kind instead.
 
 ## Build Commands
 
 ```bash
-python manage.py check       # compare upstream llms.txt (~2 KB) with the database
+python manage.py check       # compare upstream manifest.json (contentHash) with the database
 python manage.py update      # check + fetch api.json + diff + build (use --force to rebuild)
-python manage.py fetch       # only download api.json files into sources/indesignjs/
+python manage.py fetch       # only download manifest.json and api.json files into sources/indesignjs/
 python manage.py build       # only rebuild from the downloaded files
-python manage.py check-uxp   # optional: verify UXP coverage against the rendered pages (~19 MB zip)
 python manage.py validate --dir sources/indesignjs
 python check_docs.py         # docs/skills name only registered tools and parameters
 ```

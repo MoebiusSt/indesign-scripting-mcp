@@ -73,7 +73,7 @@ For strictly read-only checks, use `undo_mode="none"`.
 ## UXP Script Rules (`language="uxp"`)
 - Must import InDesign DOM: `const { app, ...enums } = require('indesign');` (or `require('indesign').app`).
 - Enums are exported by `require('indesign')` (e.g. `const { Justification, UndoModes } = require('indesign');`).
-- Look up the DOM with `runtime="uxp"` (`get_methods`, `search_dom`) and respect `uxp_note` / `extendscript_only` in results (no `collection[i]`, compare enums with `equals()`, File/Folder are async).
+- Look up the DOM with `runtime="uxp"` (`get_properties`, `get_methods`, `search_dom`) and respect `uxp_note` / `uxp_type` / `extendscript_only` in results (no `collection[i]`, compare enums with `equals()`, `uxp_type` `Promise<File>` means `await`).
 - Top-level `await` is natively supported inside user code.
 - Assign outputs to `__result` (the MCP wrapper handles serialisation via labels).
 - All runtime exceptions and engine syntax errors are safely caught and auto-dismissed by the MCP wrapper.

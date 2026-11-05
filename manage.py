@@ -4,12 +4,11 @@ InDesign DOM MCP – CLI Management Tool.
 Data source: https://www.indesignjs.de/indesignapi/ (api.json per target, by Gregor Fellenz).
 
 Commands:
-  check                     Compare upstream versions (llms.txt, ~2 KB) with the database
-  fetch                     Download api.json for dom/javascript/scriptui into sources/indesignjs/
+  check                     Compare upstream manifest.json (contentHash per target) with the database
+  fetch                     Download manifest.json and api.json for dom/javascript/scriptui into sources/indesignjs/
   analyze                   Structure report from the downloaded api.json files
   build                     Build database from the downloaded api.json files
   update                    check + fetch + diff against current database + build
-  check-uxp                 Report UXP markers on the HTML pages not covered by rules/uxp_notes.json
   validate                  Validate database (optionally against the api.json files)
   serve                     Start MCP server
   info                      Show database statistics
@@ -32,7 +31,6 @@ BASE_DIR = Path(__file__).parent
 DEFAULT_DB = BASE_DIR / "extendscript.db"
 LEGACY_DB = BASE_DIR / "indesign_dom.db"
 SOURCES_DIR = BASE_DIR / "sources" / "indesignjs"
-ARCHIVE_PATH = BASE_DIR / "sources" / "indesignapi.zip"
 GOTCHAS_PATH = BASE_DIR / "gotchas.json"
 SUBMISSIONS_PATH = BASE_DIR / "submissions" / "pending.jsonl"
 EXPECTED_SOURCES = list(dom_parser.DEFAULT_TARGETS)
@@ -65,29 +63,35 @@ def _parse_local(sources_dir: Path) -> list[dict] | None:
         print("Run 'manage.py fetch' first.")
         return None
     print(f"Parsing {sources_dir} ...")
-    return dom_parser.parse_sources(paths)
+    return dom_parser.parse_sources(paths, manifest=dom_parser.load_manifest(str(sources_dir)))
 
 
 def _remote_status(db_path: str) -> tuple[bool, list[str]]:
-    """Return (up_to_date, report lines) by comparing upstream llms.txt with db_meta."""
-    remote = dom_parser.fetch_remote_versions()
-    meta = {}
+    """Return (up_to_date, report lines) by comparing the upstream manifest contentHash per source."""
+    remote = dom_parser.fetch_manifest()["targets"]
+    local = {}
     if os.path.exists(db_path):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            rows = dict(conn.execute("SELECT key, value FROM db_meta").fetchall())
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(sources)")}
+            if "content_hash" in columns:
+                local = {
+                    key: (title, content_hash)
+                    for key, title, content_hash in conn.execute("SELECT key, title, content_hash FROM sources")
+                }
             conn.close()
-            meta = {"title": rows.get("dom_title", ""), "generated": rows.get("dom_generated", "")}
         except sqlite3.Error:
-            meta = {}
-    dom_line = remote["targets"].get(dom_parser.DEFAULT_TARGETS["dom"], "")
-    lines = [
-        f"  Upstream:  {dom_line or '(dom target missing in llms.txt)'}",
-        f"             generated {remote['generated'] or '?'}",
-        f"  Database:  {meta.get('title') or '(none)'}",
-        f"             generated {meta.get('generated') or '?'}",
-    ]
-    up_to_date = bool(meta.get("title")) and meta["title"] in dom_line and meta.get("generated") == remote["generated"]
+            local = {}
+
+    up_to_date = True
+    lines = []
+    for source_key, target in dom_parser.DEFAULT_TARGETS.items():
+        entry = remote.get(target, {})
+        title, content_hash = local.get(source_key, ("(none)", ""))
+        same = bool(content_hash) and content_hash == entry.get("contentHash")
+        up_to_date = up_to_date and same
+        lines.append(f"  {source_key:<11} upstream: {entry.get('version', '(missing in manifest)')}")
+        lines.append(f"  {'':<11} database: {title or '(none)'} - {'unchanged' if same else 'changed'}")
     return up_to_date, lines
 
 
@@ -239,54 +243,6 @@ def _print_diff(db_path: str, new_data: dict, limit: int = 25):
     print(sep)
 
 
-def cmd_check_uxp(args):
-    """Compare Gregor's rendered UXP markers with the UXP data in the database."""
-    db_path = args.db or str(_default_db_path())
-    archive = Path(args.archive) if args.archive else ARCHIVE_PATH
-    if args.download or not archive.exists():
-        print(f"Downloading {dom_parser.ARCHIVE_URL} ...")
-        dom_parser.download_archive(str(archive))
-    print(f"Scanning {archive} ...")
-    markers = dom_parser.scan_uxp_markers(str(archive), dom_parser.DEFAULT_TARGETS["dom"])
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    rows = conn.execute(
-        """SELECT c.name, c.uxp_note FROM classes c JOIN sources s ON s.id = c.source_id WHERE s.key = 'dom'"""
-    ).fetchall()
-    class_notes = {name: note for name, note in rows}
-    covered = {}
-    for kind, query in (
-        ("p", "SELECT c.name, p.name, p.uxp_note IS NOT NULL, 0 FROM properties p"),
-        ("m", "SELECT c.name, p.name, p.uxp_note IS NOT NULL, p.es_only FROM methods p"),
-    ):
-        for cls, member, has_note, es_only in conn.execute(
-            query + " JOIN classes c ON c.id = p.class_id JOIN sources s ON s.id = c.source_id WHERE s.key = 'dom'"
-        ):
-            covered[(cls, kind, member)] = (bool(has_note), bool(es_only))
-    conn.close()
-
-    gaps = []
-    for cls, data in sorted(markers.items()):
-        if data["class_note"] and not class_notes.get(cls):
-            gaps.append(f"{cls}: class note missing - {data['class_note']}")
-        for (kind, member), entry in sorted(data["members"].items()):
-            has_note, es_only = covered.get((cls, kind, member), (False, False))
-            if entry["hidden"] and not es_only:
-                gaps.append(f"{cls}.{member}: hidden under UXP but not marked es_only")
-            if (entry["note"] or entry["async"]) and not has_note:
-                text = entry["note"] or "async File/Folder entry"
-                gaps.append(f"{cls}.{member}: UXP note missing - {text}")
-
-    print(f"  Pages with UXP markers: {len(markers)}")
-    if not gaps:
-        print("  All UXP markers are covered by parser rules and uxp_notes.json.")
-        return 0
-    print(f"  Uncovered markers: {len(gaps)} (add them to uxp_notes.json or extend the rules)")
-    for line in gaps:
-        print(f"    {line}")
-    return 1
-
-
 def cmd_validate(args):
     """Validate database, optionally against the downloaded api.json files."""
     db_path = args.db or str(_default_db_path())
@@ -400,7 +356,17 @@ def _run_regression_checks(db_path: str) -> bool:
     check("Justification has values and uxp_note", bool(justification.get("values")) and "uxp_note" in justification)
 
     full_name = dom_db.get_properties("Document", source="dom", filter_text="fullName", db_path=db_path)
-    check("Document.fullName has async uxp_note", any("uxp_note" in p for p in full_name))
+    check("Document.fullName has uxp_type Promise<File>", any(p.get("uxp_type") == "Promise<File>" for p in full_name))
+
+    item_by_name = dom_db.get_methods("XMLElements", source="dom", filter_text="itemByName", db_path=db_path)
+    check("XMLElements.itemByName is extendscript_only", any(m.get("extendscript_only") for m in item_by_name))
+
+    do_script = dom_db.get_method_detail("Application", "doScript", source="dom", db_path=db_path) or {}
+    check("Application.doScript has uxp_note and extendscript_note",
+          "uxp_note" in do_script and "extendscript_note" in do_script)
+
+    index_class = dom_db.lookup_class("Index", source="dom", db_path=db_path) or {}
+    check("Index doc_url points to Index_.md", str(index_class.get("doc_url", "")).endswith("/Index_.md"))
 
     try:
         dollar = dom_db.search_dom("$", db_path=db_path)
@@ -572,7 +538,6 @@ Commands:
   analyze                   Analyze the downloaded api.json files
   build                     Build database from the downloaded api.json files
   update                    check + fetch + diff + build
-  check-uxp                 Report UXP markers not covered by rules/uxp_notes.json
   validate                  Validate database
   serve                     Start MCP server
   info                      Show database statistics
@@ -603,11 +568,6 @@ Commands:
     p_update.add_argument("--db", help=db_help)
     p_update.add_argument("--force", action="store_true", help="Rebuild even if the database is up to date")
 
-    p_uxp = subparsers.add_parser("check-uxp", help="Report UXP markers not covered by rules/uxp_notes.json")
-    p_uxp.add_argument("--archive", help=f"indesignapi.zip or unpacked folder (default: {ARCHIVE_PATH})")
-    p_uxp.add_argument("--download", action="store_true", help="Download a fresh indesignapi.zip (~19 MB)")
-    p_uxp.add_argument("--db", help=f"Database path (default: {DEFAULT_DB.name})")
-
     p_validate = subparsers.add_parser("validate", help="Validate database")
     p_validate.add_argument("--dir", help="Compare counts against the api.json files in this folder")
     p_validate.add_argument("--expect-sources", help="Comma-separated expected sources (default: dom,javascript,scriptui)")
@@ -636,7 +596,6 @@ Commands:
         "analyze": cmd_analyze,
         "build": cmd_build,
         "update": cmd_update,
-        "check-uxp": cmd_check_uxp,
         "validate": cmd_validate,
         "serve": cmd_serve,
         "info": cmd_info,

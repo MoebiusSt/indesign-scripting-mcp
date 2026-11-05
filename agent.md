@@ -16,7 +16,7 @@ The DOM server covers **three sources** in one DB, all taken from Gregor Fellenz
 
 ## Current Architecture (What Exists Now)
 
-- Build pipeline: `api.json` (per target) + `uxp_notes.json` -> `parser.py` -> `extendscript.db`
+- Build pipeline: `manifest.json` + `api.json` (per target, formatVersion 2) -> `parser.py` -> `extendscript.db`
 - Query layer: `db.py`
 - MCP layer: `server.py`
 - CLI entrypoint: `manage.py`
@@ -33,32 +33,30 @@ Primary DB file:
    - Not the OMV XML from the ExtendScript Toolkit cache (Adobe no longer ships it reliably), and not
      `indesignapi.zip` (19 MB of HTML) for the build. api.json is the structured format Gregor publishes
      for tooling; HTML is presentation markup.
-   - Version check without download: top-level `llms.txt` (~2 KB) lists every target's version line and
-     the generation date. `manage.py check` / `update` compare it with `db_meta.dom_title` / `dom_generated`.
+   - Version check without download: `manifest.json` lists per target `version`, `runtimes`, `contentHash`
+     (api.json without `generated`) and per file `sha256`. `manage.py check` / `update` compare `contentHash`
+     with `sources.content_hash`; `fetch` verifies every api.json against its sha256.
 
 2. **Single DB + source dimension**
    - No per-source DB split. Disambiguation is done by `source` (`dom|javascript|scriptui`).
    - Name collisions between `dom` and `scriptui`: Window, Button, Event, Events, Group, ListBox, Panel,
      RadioButton, StaticText. `classes` uniqueness is `(name, source_id)`; never suffix class names.
 
-3. **Gaps in api.json are closed in `parser.py`, not by hand-editing the DB**
-   - Static methods: api.json and the `.d.ts` files carry no static flag for methods. Core JavaScript and
-     ScriptUI are frozen, so `STATIC_METHODS` is a fixed table (`File.openDialog`, `Folder.selectDialog`,
-     `$.*`, `Math.*`, ...). Worth reporting upstream.
+3. **api.json formatVersion 2 is the only truth; no local tables or overrides**
+   - `parser.py` rejects api.json without `formatVersion >= 2`.
+   - Static members: `"static": true` -> `element_type='class'`.
    - Constructors: method named like its class (non-dom) -> `element_type='constructor'`.
    - ScriptUI callbacks `on[A-Z]*` -> `element_type='event'`.
-   - Reserved names: upstream escapes `Index` as `Index_`; `_canonical_name()` restores `Index` in class
-     names and type strings; `doc_url` keeps the upstream slug.
+   - Names: `name` is the original (`Index`, `$`); `doc_url` comes from `page` (`Index_.html` -> `Index_.md`).
    - Suites do not exist upstream anymore; `list_classes(type=...)` filters by kind.
+   - Upstream gaps are reported to Gregor Fellenz instead of being patched locally.
 
-4. **UXP data mirrors Gregor's ExtendScript/UXP toggle**
-   - Rules in `parser.py`: enum classes -> `equals()` note; `[]` methods -> `es_only`; dom properties typed
-     `File`/`Folder` (not arrays) -> async note; `File | Function` handlers -> handler note;
-     `javascript`/`scriptui` -> source-level "ExtendScript only" note.
-   - `uxp_notes.json`: hand-written notes that no rule can derive (e.g. `Application.scriptArgs`,
-     `XMLElements.itemByName`).
-   - `manage.py check-uxp` scans the rendered pages of `indesignapi.zip` and lists markers not covered by
-     rules + overrides. Run it after upstream updates; add gaps to `uxp_notes.json`.
+4. **UXP data comes from api.json**
+   - `uxp.available == false` -> `es_only` (`extendscript_only` in tool output, hidden with `runtime="uxp"`).
+   - `uxp.type` (properties) / `uxp.returns` (methods) -> `uxp_type` (e.g. `Promise<File>`, `string`).
+   - `notes[]` by runtime -> `uxp_note` / `es_note` (`extendscript_note`) / `note`.
+   - Targets without `uxp` in `runtimes` (`javascript`, `scriptui`) get a source-level "ExtendScript only" note.
+   - General UXP rules: `<target>/uxp.md` -> `sources.uxp_guide_url`.
 
 5. **Events have their own table** (`events`), listed by `lookup_class` and indexed in FTS as `event`.
 
@@ -67,11 +65,9 @@ Primary DB file:
 ## Fast Entry Points for Future Changes
 
 - Fetch/parse/schema/build: `parser.py`
-  - `fetch_sources()`, `fetch_remote_versions()`
-  - `parse_api_json()`, `parse_sources()`, `_resolve_type_refs()`
-  - `STATIC_METHODS`, `UXP_NOTE_*`, `_canonical_name()`
+  - `fetch_manifest()`, `load_manifest()`, `fetch_sources()`
+  - `parse_api_json()`, `parse_sources()`, `_notes()`, `_resolve_type_refs()`
   - `DB_SCHEMA`, `build_database()`, `validate()`
-  - `scan_uxp_markers()` (check only, never used by the build)
 
 - Query behavior/API shape: `db.py`
   - All lookup functions are source-aware; `get_properties`/`get_methods`/`search_dom` accept `runtime`.
@@ -81,7 +77,7 @@ Primary DB file:
   - ScriptUI warning note injection for `source="scriptui"`.
 
 - CLI workflows: `manage.py`
-  - `check`, `fetch`, `build`, `update [--force]`, `check-uxp`, `validate [--dir]`
+  - `check`, `fetch`, `build`, `update [--force]`, `validate [--dir]`
   - built-in regression checks after every build/validate.
 
 ## Agent Operating Pattern (Recommended)
@@ -97,7 +93,7 @@ For ExtendScript-specific features, prefer `source="javascript"`:
 
 - `$`, `UnitValue`, `File`, `Folder`, `Socket`, `XML`, `XMLList`, `RegExp`.
 
-For UXP scripts pass `runtime="uxp"` and respect `uxp_note` / `extendscript_only`.
+For UXP scripts pass `runtime="uxp"` and respect `uxp_note` / `uxp_type` / `extendscript_only`.
 
 ## Tool Surface (Compact)
 
@@ -143,13 +139,12 @@ For UXP scripts pass `runtime="uxp"` and respect `uxp_note` / `extendscript_only
 python -m py_compile parser.py db.py server.py manage.py
 python manage.py update --force
 python manage.py validate --dir sources/indesignjs
-python manage.py check-uxp
+python check_docs.py
 ```
 
 ## File Map (Targeted)
 
-- `parser.py`: api.json fetch + parse, UXP rules, schema, DB build/validate, UXP marker scan
-- `uxp_notes.json`: curated UXP overrides
+- `parser.py`: manifest/api.json fetch + parse, schema, DB build/validate
 - `db.py`: all SQL query semantics for MCP tools
 - `server.py`: MCP interface and tool descriptions
 - `manage.py`: maintenance CLI and operational workflows

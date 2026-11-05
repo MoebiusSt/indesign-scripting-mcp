@@ -59,9 +59,11 @@ mcp = FastMCP(
         "UnitValue, $, File/Folder, Socket, and XML/XMLList before assuming "
         "standard JavaScript behavior.\n\n"
         "UXP: the InDesign DOM is shared by ExtendScript and UXP. Entries with uxp_note behave "
-        "differently in UXP; extendscript_only methods (e.g. the collection index accessor '[]') do "
-        "not exist there. Pass runtime='uxp' to get_methods/search_dom to hide them, or "
-        "runtime='extendscript' to suppress UXP notes.\n\n"
+        "differently in UXP, uxp_type is the type under UXP (e.g. Promise<File>), "
+        "extendscript_note applies to ExtendScript only. extendscript_only members (e.g. the collection "
+        "index accessor '[]') do not exist in UXP. Pass runtime='uxp' to get_properties/get_methods/"
+        "search_dom to hide them and ExtendScript notes, or runtime='extendscript' to suppress UXP fields. "
+        "General UXP rules: uxp_guide_url in list_sources (indesignjs.de uxp.md).\n\n"
         "Every lookup_class result has doc_url, the upstream Markdown page of that object.\n\n"
         "TIP: For common DOM patterns (navigation, page items, images, text, styles, "
         "geometry, find/change, export), the InDesign Exec MCP provides a "
@@ -143,7 +145,8 @@ def get_properties(
         source: Optional source filter ("dom", "javascript", "scriptui")
         filter: Optional substring filter on property name or description
         include_inherited: If true, includes properties from superclasses
-        runtime: Optional "extendscript" (suppresses UXP notes) or "uxp"
+        runtime: Optional "extendscript" (suppresses UXP fields) or "uxp" (omits
+            extendscript_only properties and ExtendScript notes)
     """
     error = _check_runtime(runtime)
     if error:
@@ -183,8 +186,8 @@ def get_methods(
         source: Optional source filter ("dom", "javascript", "scriptui")
         filter: Optional substring filter on method name or description
         include_inherited: If true, includes methods from superclasses
-        runtime: Optional "extendscript" (suppresses UXP notes) or "uxp" (omits
-            extendscript_only methods such as the '[]' index accessor)
+        runtime: Optional "extendscript" (suppresses UXP fields) or "uxp" (omits
+            extendscript_only methods such as the '[]' index accessor and ExtendScript notes)
     """
     error = _check_runtime(runtime)
     if error:
